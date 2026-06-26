@@ -604,10 +604,7 @@ def cell_has_nucleus(
     nucleus_mask: np.ndarray,
     dilation_px: int = CELLSEG1_NUCLEUS_DILATION_PX,
 ) -> Tuple[bool, int, str]:
-    """Validate a CellSeg1 compact candidate using dilated YOLO nuclei geometry.
-
-    SAM3 clear-cell candidates intentionally do not call this function.
-    """
+    """Validate a cell candidate using dilated YOLO nuclei geometry."""
     dilated_cell = dilate_binary_mask(cell_bool, dilation_px)
     nucleus_binary = nucleus_mask > 0
     overlap_px = int((dilated_cell & nucleus_binary).sum())
@@ -911,6 +908,50 @@ def combine_clear_and_compact(sam_clear: np.ndarray, compact_candidate: np.ndarr
     return final, class_mask, rows
 
 
+def filter_final_cells_by_nucleus(
+    hybrid_mask: np.ndarray,
+    hybrid_class_mask: np.ndarray,
+    final_rows: List[dict],
+    nucleus_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, List[dict]]:
+    """Keep only final cells that have a YOLO nucleus anchor."""
+    source_by_label = {int(row["final_label"]): row for row in final_rows}
+    filtered = np.zeros(hybrid_mask.shape, dtype=np.uint16)
+    filtered_class = np.zeros(hybrid_class_mask.shape, dtype=np.uint8)
+    filtered_rows = []
+    removed_by_class: Dict[str, int] = {}
+    next_label = 1
+
+    for old in sorted(int(v) for v in np.unique(hybrid_mask) if int(v) != 0):
+        pixels = hybrid_mask == old
+        source = dict(source_by_label.get(old, {}))
+        class_id = int(source.get("final_class_id", 0))
+        class_name = source.get("final_class_name", "unknown")
+        has_nuc, nuc_overlap, gate_type = cell_has_nucleus(
+            pixels,
+            nucleus_mask,
+            dilation_px=CELLSEG1_NUCLEUS_DILATION_PX,
+        )
+        if not has_nuc:
+            removed_by_class[class_name] = removed_by_class.get(class_name, 0) + 1
+            continue
+        filtered[pixels] = next_label
+        filtered_class[pixels] = class_id
+        source["original_final_label"] = old
+        source["final_label"] = next_label
+        source["area_px"] = int(pixels.sum())
+        source["nucleus_overlap_px"] = nuc_overlap
+        source["nucleus_gate_type"] = gate_type
+        filtered_rows.append(source)
+        next_label += 1
+
+    print(
+        f"Final nucleus gate kept={int(filtered.max())} "
+        f"removed={sum(removed_by_class.values())} removed_by_class={removed_by_class}"
+    )
+    return filtered, filtered_class, filtered_rows
+
+
 def mask_bbox(mask_bool: np.ndarray) -> Tuple[int, int, int, int]:
     ys, xs = np.where(mask_bool)
     if len(xs) == 0:
@@ -1200,7 +1241,15 @@ def main() -> None:
         compact_candidate, compact_rows = filter_cellseg_compact_candidates(
             cellseg_raw, sam_clear, nucleus_mask, original_rgb
         )
-        hybrid_mask, hybrid_class_mask, final_rows = combine_clear_and_compact(sam_clear, compact_candidate)
+        pre_gate_hybrid_mask, pre_gate_hybrid_class_mask, pre_gate_final_rows = combine_clear_and_compact(
+            sam_clear, compact_candidate
+        )
+        hybrid_mask, hybrid_class_mask, final_rows = filter_final_cells_by_nucleus(
+            pre_gate_hybrid_mask,
+            pre_gate_hybrid_class_mask,
+            pre_gate_final_rows,
+            nucleus_mask,
+        )
         elapsed = time.time() - started
         tile_morphology_rows = extract_morphology_rows(
             hybrid_mask,
@@ -1247,7 +1296,9 @@ def main() -> None:
                     "yolo_nucleus_instances": int(nucleus_mask.max()),
                     "sam31_clear_instances": int(sam_clear.max()),
                     "cellseg1_residual_compact_instances": int(compact_candidate.max()),
+                    "hybrid_instances_before_nucleus_gate": int(pre_gate_hybrid_mask.max()),
                     "hybrid_instances": int(hybrid_mask.max()),
+                    "hybrid_removed_no_nucleus": int(pre_gate_hybrid_mask.max()) - int(hybrid_mask.max()),
                     "sam31_score_thresh": SAM31_SCORE_THRESH,
                     "sam31_min_area": SAM31_MIN_AREA,
                     "sam31_nms_iou_thresh": SAM31_NMS_IOU_THRESH,

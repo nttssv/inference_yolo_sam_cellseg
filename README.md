@@ -7,9 +7,11 @@ The current Trial Run 3 logic is:
 - YOLO predicts nuclei.
 - SAM3.1 predicts clear-cell boundary candidates.
 - CellSeg1 predicts dense cell-boundary candidates, used as residual compact candidates.
-- YOLO nuclei validate only CellSeg1 compact candidates.
-- SAM3.1 clear-cell candidates are not rejected when YOLO misses a nucleus.
+- YOLO nuclei validate CellSeg1 compact candidates before merging.
 - Final output is SAM3.1 clear cells plus accepted CellSeg1 compact cells.
+- Every final cell, from either SAM3.1 or CellSeg1, must have a YOLO nucleus
+  anchor after the final nucleus gate. Cells without a nucleus anchor are not
+  kept and are not counted in morphology.
 
 The script writes segmentation metrics, per-instance provenance, comparison panels,
 and per-cell morphology features including cell area, nucleus area, cytoplasm area,
