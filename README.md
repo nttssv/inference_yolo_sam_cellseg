@@ -157,6 +157,21 @@ GPU_IDS = [0, 1, 2, 3]
 Too many workers on one GPU can cause CUDA out-of-memory errors because each
 worker loads YOLO, SAM3, and CellSeg1.
 
+For large runs, keep prediction masks and CSV outputs but reduce visualization
+I/O. This is usually faster than saving two large matplotlib PNGs for every
+single tile:
+
+```bash
+export TRIAL3_SAVE_COMPARISONS=1
+export TRIAL3_COMPARISON_EVERY=25
+export TRIAL3_SAVE_DIAGNOSTICS=0
+export TRIAL3_VIS_DPI=120
+export TRIAL3_CSV_APPEND_EVERY=5
+```
+
+Use `TRIAL3_COMPARISON_EVERY=1` and `TRIAL3_SAVE_DIAGNOSTICS=1` only for small
+debug runs where you want full visual output for every tile.
+
 The notebook monitor is:
 
 ```text

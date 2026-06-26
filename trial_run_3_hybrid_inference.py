@@ -170,6 +170,12 @@ YOLO_MIN_NUCLEUS_AREA = int(os.getenv("TRIAL3_YOLO_MIN_NUCLEUS_AREA", "10"))
 
 CELLSEG1_NUCLEUS_OVERLAP_PX = int(os.getenv("TRIAL3_MIN_NUCLEUS_OVERLAP_PX", "5"))
 DISPLAY_IMAGES = os.getenv("TRIAL3_DISPLAY_IMAGES", "0") == "1"
+SAVE_COMPARISONS = os.getenv("TRIAL3_SAVE_COMPARISONS", "1") == "1"
+SAVE_DIAGNOSTICS = os.getenv("TRIAL3_SAVE_DIAGNOSTICS", "1") == "1"
+COMPARISON_EVERY = max(1, int(os.getenv("TRIAL3_COMPARISON_EVERY", "1")))
+DIAGNOSTIC_EVERY = max(1, int(os.getenv("TRIAL3_DIAGNOSTIC_EVERY", "1")))
+VIS_DPI = int(os.getenv("TRIAL3_VIS_DPI", "180"))
+CSV_APPEND_EVERY = max(1, int(os.getenv("TRIAL3_CSV_APPEND_EVERY", "10")))
 
 GT_COLOR = np.array([0, 180, 120], dtype=np.uint8)
 NUCLEUS_COLOR = np.array([255, 0, 0], dtype=np.uint8)
@@ -1053,6 +1059,14 @@ def save_csv(path: Path, rows: List[dict]) -> None:
             csv.writer(handle).writerow(["empty"])
 
 
+def append_csv_rows(path: Path, rows: List[dict]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    pd.DataFrame(rows).to_csv(path, mode="a", header=write_header, index=False)
+
+
 def load_existing_csv_rows(path: Path) -> List[dict]:
     if not (TRIAL3_SKIP_EXISTING and path.exists() and path.stat().st_size > 0):
         return []
@@ -1139,9 +1153,13 @@ def main() -> None:
     source_instance_rows: List[dict] = load_existing_csv_rows(source_csv)
     final_instance_rows: List[dict] = load_existing_csv_rows(final_csv)
     morphology_rows: List[dict] = load_existing_csv_rows(morphology_csv)
+    pending_metrics_rows: List[dict] = []
+    pending_source_instance_rows: List[dict] = []
+    pending_final_instance_rows: List[dict] = []
+    pending_morphology_rows: List[dict] = []
     saved_images: List[Path] = []
 
-    for image_info in trial_images:
+    for tile_index, image_info in enumerate(trial_images, start=1):
         split = image_info["_split"]
         tile_id = Path(image_info["file_name"]).stem
         tile_key = f"{split}_{tile_id}"
@@ -1177,19 +1195,19 @@ def main() -> None:
         )
         hybrid_mask, hybrid_class_mask, final_rows = combine_clear_and_compact(sam_clear, compact_candidate)
         elapsed = time.time() - started
-        morphology_rows.extend(
-            extract_morphology_rows(
-                hybrid_mask,
-                hybrid_class_mask,
-                nucleus_mask,
-                final_rows,
-                split,
-                tile_id,
-                image_info["file_name"],
-                image_path,
-                tile_geometry,
-            )
+        tile_morphology_rows = extract_morphology_rows(
+            hybrid_mask,
+            hybrid_class_mask,
+            nucleus_mask,
+            final_rows,
+            split,
+            tile_id,
+            image_info["file_name"],
+            image_path,
+            tile_geometry,
         )
+        morphology_rows.extend(tile_morphology_rows)
+        pending_morphology_rows.extend(tile_morphology_rows)
 
         paths = expected_output_paths(tile_key)
         Image.fromarray(hybrid_mask.astype(np.uint16)).save(paths["hybrid"])
@@ -1236,6 +1254,7 @@ def main() -> None:
                 }
             )
             metrics_rows.append(row)
+            pending_metrics_rows.append(row)
 
         for row in nucleus_rows + sam_rows + compact_rows:
             row.update(
@@ -1249,6 +1268,7 @@ def main() -> None:
                 }
             )
             source_instance_rows.append(row)
+            pending_source_instance_rows.append(row)
         for row in final_rows:
             row.update(
                 {
@@ -1261,74 +1281,95 @@ def main() -> None:
                 }
             )
             final_instance_rows.append(row)
+            pending_final_instance_rows.append(row)
 
-        gt_available = gt_available_by_model.get("Hybrid_vs_GT_all_boundaries", False)
-        gt_panel = (
-            draw_instance_mask(original_rgb, gt_all, GT_COLOR)
-            if gt_available
-            else text_panel_like(original_rgb, ["GT unavailable", "raw tile mode", "metrics: NaN"])
-        )
-        hybrid_by_class = draw_class_mask(
-            original_rgb,
-            hybrid_class_mask,
-            {
-                1: SAM_CLEAR_COLOR,
-                2: CELLSEG_COMPACT_COLOR,
-            },
-        )
+        write_comparison = SAVE_COMPARISONS and (tile_index == 1 or tile_index % COMPARISON_EVERY == 0)
+        write_diagnostic = SAVE_DIAGNOSTICS and (tile_index == 1 or tile_index % DIAGNOSTIC_EVERY == 0)
+        if write_comparison or write_diagnostic:
+            gt_available = gt_available_by_model.get("Hybrid_vs_GT_all_boundaries", False)
+            gt_panel = (
+                draw_instance_mask(original_rgb, gt_all, GT_COLOR)
+                if gt_available
+                else text_panel_like(original_rgb, ["GT unavailable", "raw tile mode", "metrics: NaN"])
+            )
 
-        panels = [
-            original_rgb,
-            gt_panel,
-            draw_instance_mask(original_rgb, sam_clear, SAM_CLEAR_COLOR),
-            draw_instance_mask(original_rgb, compact_candidate, CELLSEG_COMPACT_COLOR),
-            draw_instance_mask(original_rgb, hybrid_mask, HYBRID_COLOR),
-        ]
-        titles = [
-            f"{tile_key}: original",
-            f"GT all n={int(gt_all.max())}" if gt_available else "GT unavailable",
-            f"SAM3 clear n={int(sam_clear.max())}",
-            f"CellSeg1 residual compact n={int(compact_candidate.max())}",
-            f"Hybrid n={int(hybrid_mask.max())}",
-        ]
-        fig, axes = plt.subplots(1, 5, figsize=(25, 5))
-        for ax, panel, title in zip(axes, panels, titles):
-            ax.imshow(panel)
-            ax.set_title(title)
-            ax.axis("off")
-        fig.tight_layout()
-        out_img = COMPARE_DIR / f"{tile_key}_trial3_compare.png"
-        fig.savefig(out_img, dpi=180)
-        plt.close(fig)
-        saved_images.append(out_img)
-        if DISPLAY_IMAGES and IPyImage is not None:
-            display(IPyImage(filename=str(out_img)))
+            if write_comparison:
+                panels = [
+                    original_rgb,
+                    gt_panel,
+                    draw_instance_mask(original_rgb, sam_clear, SAM_CLEAR_COLOR),
+                    draw_instance_mask(original_rgb, compact_candidate, CELLSEG_COMPACT_COLOR),
+                    draw_instance_mask(original_rgb, hybrid_mask, HYBRID_COLOR),
+                ]
+                titles = [
+                    f"{tile_key}: original",
+                    f"GT all n={int(gt_all.max())}" if gt_available else "GT unavailable",
+                    f"SAM3 clear n={int(sam_clear.max())}",
+                    f"CellSeg1 residual compact n={int(compact_candidate.max())}",
+                    f"Hybrid n={int(hybrid_mask.max())}",
+                ]
+                fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+                for ax, panel, title in zip(axes, panels, titles):
+                    ax.imshow(panel)
+                    ax.set_title(title)
+                    ax.axis("off")
+                fig.tight_layout()
+                out_img = COMPARE_DIR / f"{tile_key}_trial3_compare.png"
+                fig.savefig(out_img, dpi=VIS_DPI)
+                plt.close(fig)
+                saved_images.append(out_img)
+                if DISPLAY_IMAGES and IPyImage is not None:
+                    display(IPyImage(filename=str(out_img)))
 
-        diagnostic_panels = [
-            original_rgb,
-            draw_instance_mask(original_rgb, nucleus_mask, NUCLEUS_COLOR),
-            draw_instance_mask(original_rgb, sam_clear, SAM_CLEAR_COLOR),
-            draw_instance_mask(original_rgb, compact_candidate, CELLSEG_COMPACT_COLOR),
-            draw_instance_mask(original_rgb, hybrid_mask, HYBRID_COLOR),
-            hybrid_by_class,
-        ]
-        diagnostic_titles = [
-            f"{tile_key}: original",
-            f"YOLO nuclei n={int(nucleus_mask.max())}",
-            f"SAM3 clear n={int(sam_clear.max())}",
-            f"CellSeg1 compact n={int(compact_candidate.max())}",
-            f"Final hybrid n={int(hybrid_mask.max())}",
-            "Hybrid by class: blue=SAM3, amber=CellSeg1",
-        ]
-        diag_fig, diag_axes = plt.subplots(1, 6, figsize=(30, 5))
-        for ax, panel, title in zip(diag_axes, diagnostic_panels, diagnostic_titles):
-            ax.imshow(panel)
-            ax.set_title(title)
-            ax.axis("off")
-        diag_fig.tight_layout()
-        diag_img = DIAGNOSTIC_DIR / f"{tile_key}_trial3_diagnostic.png"
-        diag_fig.savefig(diag_img, dpi=180)
-        plt.close(diag_fig)
+            if write_diagnostic:
+                hybrid_by_class = draw_class_mask(
+                    original_rgb,
+                    hybrid_class_mask,
+                    {
+                        1: SAM_CLEAR_COLOR,
+                        2: CELLSEG_COMPACT_COLOR,
+                    },
+                )
+                diagnostic_panels = [
+                    original_rgb,
+                    draw_instance_mask(original_rgb, nucleus_mask, NUCLEUS_COLOR),
+                    draw_instance_mask(original_rgb, sam_clear, SAM_CLEAR_COLOR),
+                    draw_instance_mask(original_rgb, compact_candidate, CELLSEG_COMPACT_COLOR),
+                    draw_instance_mask(original_rgb, hybrid_mask, HYBRID_COLOR),
+                    hybrid_by_class,
+                ]
+                diagnostic_titles = [
+                    f"{tile_key}: original",
+                    f"YOLO nuclei n={int(nucleus_mask.max())}",
+                    f"SAM3 clear n={int(sam_clear.max())}",
+                    f"CellSeg1 compact n={int(compact_candidate.max())}",
+                    f"Final hybrid n={int(hybrid_mask.max())}",
+                    "Hybrid by class: blue=SAM3, amber=CellSeg1",
+                ]
+                diag_fig, diag_axes = plt.subplots(1, 6, figsize=(30, 5))
+                for ax, panel, title in zip(diag_axes, diagnostic_panels, diagnostic_titles):
+                    ax.imshow(panel)
+                    ax.set_title(title)
+                    ax.axis("off")
+                diag_fig.tight_layout()
+                diag_img = DIAGNOSTIC_DIR / f"{tile_key}_trial3_diagnostic.png"
+                diag_fig.savefig(diag_img, dpi=VIS_DPI)
+                plt.close(diag_fig)
+
+        if tile_index % CSV_APPEND_EVERY == 0:
+            append_csv_rows(metrics_csv, pending_metrics_rows)
+            append_csv_rows(source_csv, pending_source_instance_rows)
+            append_csv_rows(final_csv, pending_final_instance_rows)
+            append_csv_rows(morphology_csv, pending_morphology_rows)
+            pending_metrics_rows.clear()
+            pending_source_instance_rows.clear()
+            pending_final_instance_rows.clear()
+            pending_morphology_rows.clear()
+
+    append_csv_rows(metrics_csv, pending_metrics_rows)
+    append_csv_rows(source_csv, pending_source_instance_rows)
+    append_csv_rows(final_csv, pending_final_instance_rows)
+    append_csv_rows(morphology_csv, pending_morphology_rows)
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df.to_csv(metrics_csv, index=False)
