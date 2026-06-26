@@ -16,6 +16,7 @@ in this project, while every important path can still be overridden with env var
 from __future__ import annotations
 
 import csv
+import faulthandler
 import json
 import os
 import re
@@ -24,6 +25,23 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+faulthandler.enable()
+TRACEBACK_AFTER_SECONDS = int(os.getenv("TRIAL3_TRACEBACK_AFTER_SECONDS", "180"))
+if TRACEBACK_AFTER_SECONDS > 0:
+    faulthandler.dump_traceback_later(TRACEBACK_AFTER_SECONDS, repeat=True)
+
+print(
+    f"[trial3 bootstrap] pid={os.getpid()} cwd={Path.cwd()} "
+    f"traceback_after={TRACEBACK_AFTER_SECONDS}s",
+    flush=True,
+)
 
 import cv2
 import matplotlib.pyplot as plt
@@ -163,6 +181,10 @@ HYBRID_COLOR = np.array([0, 255, 255], dtype=np.uint8)
 def assert_path(path: Path, label: str) -> None:
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
+
+
+def log_step(message: str) -> None:
+    print(f"[trial3] {time.strftime('%Y-%m-%d %H:%M:%S')} | {message}", flush=True)
 
 
 def load_coco() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], List[dict]], List[dict]]:
@@ -1045,6 +1067,7 @@ def load_existing_csv_rows(path: Path) -> List[dict]:
 
 
 def main() -> None:
+    log_step("main started")
     required_paths = [
         (SAM3_REPO, "SAM3 repo"),
         (SAM31_CHECKPOINT, "SAM3 checkpoint"),
@@ -1061,8 +1084,10 @@ def main() -> None:
         required_paths.append((COCO_ROOT, "COCO root"))
 
     for path, label in required_paths:
+        log_step(f"checking {label}: {path}")
         assert_path(path, label)
 
+    log_step("creating output directories")
     PRED_MASK_DIR.mkdir(parents=True, exist_ok=True)
     COMPARE_DIR.mkdir(parents=True, exist_ok=True)
     DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -1070,24 +1095,29 @@ def main() -> None:
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
+    log_step("loading input index")
     cat_by_split_and_id, anns_by_split_and_image, all_images = load_inputs()
     trial_images = select_images(all_images)
     total_images_before_sharding = len(trial_images)
     trial_images = apply_sharding(trial_images)
 
-    print("Trial Run 3 output:", OUT_DIR)
-    print("Input mode:", "image_dir" if USE_IMAGE_DIR else "coco")
+    print("Trial Run 3 output:", OUT_DIR, flush=True)
+    print("Input mode:", "image_dir" if USE_IMAGE_DIR else "coco", flush=True)
     if USE_IMAGE_DIR:
-        print("Tile image directory:", TRIAL3_IMAGE_DIR)
-        print("Optional mask directory:", TRIAL3_MASK_DIR or "(not set)")
-    print("Total images before sharding:", total_images_before_sharding)
-    print("TRIAL3_SHARD_ID:", TRIAL3_SHARD_ID)
-    print("TRIAL3_NUM_SHARDS:", TRIAL3_NUM_SHARDS)
-    print("Images assigned to this worker:", len(trial_images))
-    print("Assigned image keys:", [f"{x['_split']}_{Path(x['file_name']).stem}" for x in trial_images])
-    print("TRIAL3_SKIP_EXISTING:", int(TRIAL3_SKIP_EXISTING))
-    print("SAM3 prompts:", SAM31_CLEAR_PROMPTS)
-    print("SAM3 score threshold:", SAM31_SCORE_THRESH)
+        print("Tile image directory:", TRIAL3_IMAGE_DIR, flush=True)
+        print("Optional mask directory:", TRIAL3_MASK_DIR or "(not set)", flush=True)
+    print("Total images before sharding:", total_images_before_sharding, flush=True)
+    print("TRIAL3_SHARD_ID:", TRIAL3_SHARD_ID, flush=True)
+    print("TRIAL3_NUM_SHARDS:", TRIAL3_NUM_SHARDS, flush=True)
+    print("Images assigned to this worker:", len(trial_images), flush=True)
+    assigned_keys = [f"{x['_split']}_{Path(x['file_name']).stem}" for x in trial_images]
+    preview_count = min(20, len(assigned_keys))
+    print("Assigned image keys preview:", assigned_keys[:preview_count], flush=True)
+    if len(assigned_keys) > preview_count:
+        print(f"Assigned image keys truncated: showing {preview_count}/{len(assigned_keys)}", flush=True)
+    print("TRIAL3_SKIP_EXISTING:", int(TRIAL3_SKIP_EXISTING), flush=True)
+    print("SAM3 prompts:", SAM31_CLEAR_PROMPTS, flush=True)
+    print("SAM3 score threshold:", SAM31_SCORE_THRESH, flush=True)
 
     metrics_csv = OUT_DIR / "trial_run_3_metrics.csv"
     source_csv = OUT_DIR / "trial_run_3_source_instances.csv"
@@ -1096,11 +1126,14 @@ def main() -> None:
     morphology_csv = OUT_DIR / "trial_run_3_morphology_features.csv"
     morphology_summary_csv = OUT_DIR / "trial_run_3_morphology_summary.csv"
 
+    log_step(f"loading YOLO model: {YOLO_MODEL_PATH}")
     yolo_model = YOLO(str(YOLO_MODEL_PATH))
-    print("YOLO names:", yolo_model.names)
+    print("YOLO names:", yolo_model.names, flush=True)
+    log_step("loading SAM3 processor")
     processor = load_sam3_processor()
+    log_step("loading CellSeg1 predictor")
     cellseg_config, read_image_to_numpy, resize_image, predict_images = load_cellseg1()
-    print("CellSeg1 LoRA:", cellseg_config["result_pth_path"])
+    print("CellSeg1 LoRA:", cellseg_config["result_pth_path"], flush=True)
 
     metrics_rows: List[dict] = load_existing_csv_rows(metrics_csv)
     source_instance_rows: List[dict] = load_existing_csv_rows(source_csv)
