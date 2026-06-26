@@ -81,6 +81,7 @@ TRIAL3_IMAGE_SUFFIXES = tuple(
     for token in os.getenv("TRIAL3_IMAGE_SUFFIXES", ".png,.jpg,.jpeg,.tif,.tiff").split(",")
     if token.strip()
 )
+FAST_IMAGE_INDEX = os.getenv("TRIAL3_FAST_IMAGE_INDEX", "1") == "1"
 SAM3_REPO = Path(
     os.getenv("SAM3_REPO", "/home/jovyan/Desktop/sam31-cgh-training-data/sam3")
 ).expanduser()
@@ -254,8 +255,13 @@ def load_image_dir() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], 
     image_infos = []
     image_files = sorted(p for p in TRIAL3_IMAGE_DIR.iterdir() if is_image_file(p))
     for idx, image_path in enumerate(image_files, start=1):
-        with Image.open(image_path) as image:
-            width, height = image.size
+        tile_geometry = parse_tile_geometry(image_path.name)
+        if FAST_IMAGE_INDEX and not pd.isna(tile_geometry["tile_w"]) and not pd.isna(tile_geometry["tile_h"]):
+            width = int(tile_geometry["tile_w"])
+            height = int(tile_geometry["tile_h"])
+        else:
+            with Image.open(image_path) as image:
+                width, height = image.size
         mask_path = find_mask_for_image(image_path)
         image_infos.append(
             {
@@ -263,7 +269,7 @@ def load_image_dir() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], 
                 "file_name": image_path.name,
                 "width": int(width),
                 "height": int(height),
-                **parse_tile_geometry(image_path.name),
+                **tile_geometry,
                 "_split": TRIAL3_IMAGE_SPLIT,
                 "_source": "image_dir",
                 "_image_path": str(image_path),
@@ -1120,6 +1126,7 @@ def main() -> None:
     if USE_IMAGE_DIR:
         print("Tile image directory:", TRIAL3_IMAGE_DIR, flush=True)
         print("Optional mask directory:", TRIAL3_MASK_DIR or "(not set)", flush=True)
+        print("TRIAL3_FAST_IMAGE_INDEX:", int(FAST_IMAGE_INDEX), flush=True)
     print("Total images before sharding:", total_images_before_sharding, flush=True)
     print("TRIAL3_SHARD_ID:", TRIAL3_SHARD_ID, flush=True)
     print("TRIAL3_NUM_SHARDS:", TRIAL3_NUM_SHARDS, flush=True)
