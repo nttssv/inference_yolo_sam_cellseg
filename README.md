@@ -54,7 +54,7 @@ export TRIAL3_TILE_KEYS=ALL
 export TRIAL3_CELLSEG1_NUCLEUS_DILATION_PX=8
 export TRIAL3_SAM31_NMS_IOU_THRESH=0.80
 
-python hybrid_inference_yolo_sam_cellseg.py
+python trial_run_3_hybrid_inference.py
 ```
 
 Outputs are written by default to:
@@ -90,14 +90,14 @@ Run only the first four COCO images:
 export TRIAL3_IMAGE_DIR="$HOME/Desktop/prototype5_whole_image_runs/target_region_6262_13752um/tiles"
 export TRIAL3_TILE_KEYS=ALL
 export TRIAL3_MAX_IMAGES=4
-python hybrid_inference_yolo_sam_cellseg.py
+python trial_run_3_hybrid_inference.py
 ```
 
 Run specific tiles:
 
 ```bash
 export TRIAL3_TILE_KEYS="train_human_compact_tile_001,train_human_compact_tile_002"
-python hybrid_inference_yolo_sam_cellseg.py
+python trial_run_3_hybrid_inference.py
 ```
 
 For raw image-directory mode without ground-truth masks, Dice/IoU/Precision/Recall
@@ -107,6 +107,79 @@ ground-truth masks are available, set:
 
 ```bash
 export TRIAL3_MASK_DIR="/path/to/same_name_instance_masks"
+```
+
+`hybrid_inference_yolo_sam_cellseg.py` is kept as a backward-compatible wrapper.
+
+## Scale Trial Run 3 to Many Tiles
+
+The main script supports deterministic sharding for large folders, such as ~5000
+raw image tiles:
+
+```bash
+export TRIAL3_IMAGE_DIR="$HOME/Desktop/prototype5_whole_image_runs/target_region_6262_13752um/tiles"
+export TRIAL3_TILE_KEYS=ALL
+export TRIAL3_NUM_SHARDS=4
+export TRIAL3_SHARD_ID=0
+export TRIAL3_SKIP_EXISTING=1
+export TRIAL3_OUT_DIR="$HOME/Desktop/prototype5_whole_image_runs/target_region_6262_13752um/trial_run_3_worker_00"
+
+python trial_run_3_hybrid_inference.py
+```
+
+Sharding rule:
+
+```text
+image_index % TRIAL3_NUM_SHARDS == TRIAL3_SHARD_ID
+```
+
+Each worker should use a different `TRIAL3_SHARD_ID` and its own
+`TRIAL3_OUT_DIR`.
+
+For one GPU, start conservatively:
+
+```python
+N_WORKERS = 1
+```
+
+or, if memory allows:
+
+```python
+N_WORKERS = 2
+```
+
+For multiple GPUs:
+
+```python
+GPU_IDS = [0, 1, 2, 3]
+```
+
+Too many workers on one GPU can cause CUDA out-of-memory errors because each
+worker loads YOLO, SAM3, and CellSeg1.
+
+The notebook monitor is:
+
+```text
+notebooks/monitor_trial_run_3_scale.ipynb
+```
+
+Open it in Jupyter, set `REPO`, `BASE_OUT`, `N_WORKERS`, and `GPU_IDS`, then run
+the launch and monitor cells. The live dashboard refreshes every 5 seconds
+in-place with:
+
+- worker status, assigned/completed images, ETA, elapsed time
+- latest comparison images
+- aggregate Dice, IoU, precision, recall, specificity
+- morphology progress, cells/sec, tiles/sec, and estimated remaining time
+
+It writes one output directory and log file per worker and can merge worker CSV
+files into:
+
+```text
+merged_trial_run_3_metrics.csv
+merged_trial_run_3_source_instances.csv
+merged_trial_run_3_final_instances.csv
+merged_trial_run_3_morphology_features.csv
 ```
 
 ## Useful Parameters
