@@ -113,6 +113,7 @@ TRIAL3_NAME = os.getenv(
 OUT_DIR = Path(os.getenv("TRIAL3_OUT_DIR", str(SAM31_OUTPUT_ROOT / TRIAL3_NAME))).expanduser()
 PRED_MASK_DIR = OUT_DIR / "pred_masks"
 COMPARE_DIR = OUT_DIR / "comparison_images"
+DIAGNOSTIC_DIR = OUT_DIR / "diagnostic_images"
 
 SPLITS = [token.strip() for token in os.getenv("TRIAL3_SPLITS", "train,test").split(",") if token.strip()]
 TRIAL3_TILE_KEYS = [
@@ -404,6 +405,45 @@ def draw_instance_mask(img_rgb: np.ndarray, mask: np.ndarray, color: np.ndarray,
         contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(out, contours, -1, tuple(map(int, color)), 2)
     return cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0)
+
+
+def draw_class_mask(
+    img_rgb: np.ndarray,
+    class_mask: np.ndarray,
+    colors_by_class: Dict[int, np.ndarray],
+    alpha: float = 0.32,
+) -> np.ndarray:
+    class_mask = resize_mask_to_image(class_mask, img_rgb)
+    out = img_rgb.copy()
+    overlay = img_rgb.copy()
+
+    for class_id, color in colors_by_class.items():
+        pixels = class_mask == int(class_id)
+        if not pixels.any():
+            continue
+        overlay[pixels] = color
+        contours, _ = cv2.findContours(pixels.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, contours, -1, tuple(map(int, color)), 2)
+
+    return cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0)
+
+
+def text_panel_like(img_rgb: np.ndarray, lines: Sequence[str]) -> np.ndarray:
+    panel = np.full_like(img_rgb, 245, dtype=np.uint8)
+    y = 36
+    for line in lines:
+        cv2.putText(
+            panel,
+            line,
+            (20, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (35, 35, 35),
+            2,
+            cv2.LINE_AA,
+        )
+        y += 34
+    return panel
 
 
 def binary_metrics(gt_mask: np.ndarray, pred_mask: np.ndarray) -> dict:
@@ -979,6 +1019,7 @@ def main() -> None:
 
     PRED_MASK_DIR.mkdir(parents=True, exist_ok=True)
     COMPARE_DIR.mkdir(parents=True, exist_ok=True)
+    DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
     torch.use_deterministic_algorithms(False)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
@@ -1128,16 +1169,31 @@ def main() -> None:
             )
             final_instance_rows.append(row)
 
+        gt_available = gt_available_by_model.get("Hybrid_vs_GT_all_boundaries", False)
+        gt_panel = (
+            draw_instance_mask(original_rgb, gt_all, GT_COLOR)
+            if gt_available
+            else text_panel_like(original_rgb, ["GT unavailable", "raw tile mode", "metrics: NaN"])
+        )
+        hybrid_by_class = draw_class_mask(
+            original_rgb,
+            hybrid_class_mask,
+            {
+                1: SAM_CLEAR_COLOR,
+                2: CELLSEG_COMPACT_COLOR,
+            },
+        )
+
         panels = [
             original_rgb,
-            draw_instance_mask(original_rgb, gt_all, GT_COLOR),
+            gt_panel,
             draw_instance_mask(original_rgb, sam_clear, SAM_CLEAR_COLOR),
             draw_instance_mask(original_rgb, compact_candidate, CELLSEG_COMPACT_COLOR),
             draw_instance_mask(original_rgb, hybrid_mask, HYBRID_COLOR),
         ]
         titles = [
             f"{tile_key}: original",
-            f"GT all n={int(gt_all.max())}" if gt_available_by_model.get("Hybrid_vs_GT_all_boundaries", False) else "GT unavailable",
+            f"GT all n={int(gt_all.max())}" if gt_available else "GT unavailable",
             f"SAM3 clear n={int(sam_clear.max())}",
             f"CellSeg1 residual compact n={int(compact_candidate.max())}",
             f"Hybrid n={int(hybrid_mask.max())}",
@@ -1154,6 +1210,32 @@ def main() -> None:
         saved_images.append(out_img)
         if DISPLAY_IMAGES and IPyImage is not None:
             display(IPyImage(filename=str(out_img)))
+
+        diagnostic_panels = [
+            original_rgb,
+            draw_instance_mask(original_rgb, nucleus_mask, NUCLEUS_COLOR),
+            draw_instance_mask(original_rgb, sam_clear, SAM_CLEAR_COLOR),
+            draw_instance_mask(original_rgb, compact_candidate, CELLSEG_COMPACT_COLOR),
+            draw_instance_mask(original_rgb, hybrid_mask, HYBRID_COLOR),
+            hybrid_by_class,
+        ]
+        diagnostic_titles = [
+            f"{tile_key}: original",
+            f"YOLO nuclei n={int(nucleus_mask.max())}",
+            f"SAM3 clear n={int(sam_clear.max())}",
+            f"CellSeg1 compact n={int(compact_candidate.max())}",
+            f"Final hybrid n={int(hybrid_mask.max())}",
+            "Hybrid by class: blue=SAM3, amber=CellSeg1",
+        ]
+        diag_fig, diag_axes = plt.subplots(1, 6, figsize=(30, 5))
+        for ax, panel, title in zip(diag_axes, diagnostic_panels, diagnostic_titles):
+            ax.imshow(panel)
+            ax.set_title(title)
+            ax.axis("off")
+        diag_fig.tight_layout()
+        diag_img = DIAGNOSTIC_DIR / f"{tile_key}_trial3_diagnostic.png"
+        diag_fig.savefig(diag_img, dpi=180)
+        plt.close(diag_fig)
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_csv = OUT_DIR / "trial_run_3_metrics.csv"
@@ -1212,6 +1294,7 @@ def main() -> None:
     print("Morphology features:", morphology_csv)
     print("Morphology summary:", morphology_summary_csv)
     print("Comparison images:", COMPARE_DIR)
+    print("Diagnostic images:", DIAGNOSTIC_DIR)
     print(summary_df)
     if not morphology_summary_df.empty:
         print(morphology_summary_df)

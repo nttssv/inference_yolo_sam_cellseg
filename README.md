@@ -76,6 +76,7 @@ trial_run_3_final_instances.csv
 trial_run_3_morphology_features.csv
 trial_run_3_morphology_summary.csv
 comparison_images/*_trial3_compare.png
+diagnostic_images/*_trial3_diagnostic.png
 pred_masks/*_hybrid_instance_mask.png
 pred_masks/*_hybrid_class_mask.png
 pred_masks/*_yolo_nucleus_mask.png
