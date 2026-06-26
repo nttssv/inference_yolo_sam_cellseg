@@ -212,6 +212,9 @@ export TRIAL3_MAX_OVERLAP_WITH_SAM_CLEAR=0.20
 
 export TRIAL3_YOLO_CONF=0.25
 export TRIAL3_YOLO_IOU=0.50
+
+# Used by the monitoring notebook to display live morphology in um and um^2.
+export TRIAL3_MICRONS_PER_PIXEL=0.25
 ```
 
 ## Morphology Output
