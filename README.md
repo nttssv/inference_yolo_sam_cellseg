@@ -49,6 +49,7 @@ export CELLSEG1_RUN_DIR="$HOME/Desktop/1.Data/training_pa_he_annotation_full/out
 ## Run All Tiles
 
 ```bash
+export TRIAL3_IMAGE_DIR="$HOME/Desktop/prototype5_whole_image_runs/target_region_6262_13752um/tiles"
 export TRIAL3_TILE_KEYS=ALL
 export TRIAL3_CELLSEG1_NUCLEUS_DILATION_PX=8
 export TRIAL3_SAM31_NMS_IOU_THRESH=0.80
@@ -59,8 +60,11 @@ python hybrid_inference_yolo_sam_cellseg.py
 Outputs are written by default to:
 
 ```text
-$SAM31_OUTPUT_ROOT/trial_run_3_hybrid_all_tiles/
+$SAM31_OUTPUT_ROOT/trial_run_3_hybrid_image_dir_all_tiles/
 ```
+
+If you do not set `TRIAL3_IMAGE_DIR`, the script falls back to the COCO dataset
+under `TRIAL3_COCO_ROOT`.
 
 Key files:
 
@@ -82,6 +86,7 @@ pred_masks/*_yolo_nucleus_mask.png
 Run only the first four COCO images:
 
 ```bash
+export TRIAL3_IMAGE_DIR="$HOME/Desktop/prototype5_whole_image_runs/target_region_6262_13752um/tiles"
 export TRIAL3_TILE_KEYS=ALL
 export TRIAL3_MAX_IMAGES=4
 python hybrid_inference_yolo_sam_cellseg.py
@@ -92,6 +97,15 @@ Run specific tiles:
 ```bash
 export TRIAL3_TILE_KEYS="train_human_compact_tile_001,train_human_compact_tile_002"
 python hybrid_inference_yolo_sam_cellseg.py
+```
+
+For raw image-directory mode without ground-truth masks, Dice/IoU/Precision/Recall
+are written as `NaN` with `gt_available=False`. The script still writes prediction
+masks, comparison panels, provenance CSVs, and morphology features. If same-name
+ground-truth masks are available, set:
+
+```bash
+export TRIAL3_MASK_DIR="/path/to/same_name_instance_masks"
 ```
 
 ## Useful Parameters

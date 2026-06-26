@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sys
 import time
 from contextlib import nullcontext
@@ -51,6 +52,17 @@ COCO_ROOT = Path(
         str(PACKAGE_ROOT / "dataset" / "coco_sam3" / "cgh_pathology_sam31"),
     )
 ).expanduser()
+TRIAL3_IMAGE_DIR_RAW = os.getenv("TRIAL3_IMAGE_DIR", "").strip()
+TRIAL3_MASK_DIR_RAW = os.getenv("TRIAL3_MASK_DIR", "").strip()
+TRIAL3_IMAGE_DIR = Path(TRIAL3_IMAGE_DIR_RAW).expanduser() if TRIAL3_IMAGE_DIR_RAW else None
+TRIAL3_MASK_DIR = Path(TRIAL3_MASK_DIR_RAW).expanduser() if TRIAL3_MASK_DIR_RAW else None
+USE_IMAGE_DIR = TRIAL3_IMAGE_DIR is not None
+TRIAL3_IMAGE_SPLIT = os.getenv("TRIAL3_IMAGE_SPLIT", "inference")
+TRIAL3_IMAGE_SUFFIXES = tuple(
+    token.strip().lower()
+    for token in os.getenv("TRIAL3_IMAGE_SUFFIXES", ".png,.jpg,.jpeg,.tif,.tiff").split(",")
+    if token.strip()
+)
 SAM3_REPO = Path(
     os.getenv("SAM3_REPO", "/home/jovyan/Desktop/sam31-cgh-training-data/sam3")
 ).expanduser()
@@ -92,7 +104,11 @@ TRIAL3_TILE_KEYS_RAW = os.getenv("TRIAL3_TILE_KEYS", "ALL").strip()
 PROCESS_ALL_TILES = TRIAL3_TILE_KEYS_RAW.upper() in {"", "*", "ALL"}
 TRIAL3_NAME = os.getenv(
     "TRIAL3_NAME",
-    "trial_run_3_hybrid_all_tiles" if PROCESS_ALL_TILES else "trial_run_3_hybrid_selected_tiles",
+    "trial_run_3_hybrid_image_dir_all_tiles"
+    if USE_IMAGE_DIR and PROCESS_ALL_TILES
+    else "trial_run_3_hybrid_all_tiles"
+    if PROCESS_ALL_TILES
+    else "trial_run_3_hybrid_selected_tiles",
 )
 OUT_DIR = Path(os.getenv("TRIAL3_OUT_DIR", str(SAM31_OUTPUT_ROOT / TRIAL3_NAME))).expanduser()
 PRED_MASK_DIR = OUT_DIR / "pred_masks"
@@ -161,10 +177,74 @@ def load_coco() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], List[
         for image_info in coco["images"]:
             row = dict(image_info)
             row["_split"] = split
+            row["_source"] = "coco"
+            row["_image_path"] = str(COCO_ROOT / split / row["file_name"])
+            row["_gt_mask_path"] = ""
+            row.update(parse_tile_geometry(row["file_name"]))
             image_infos.append(row)
 
     image_infos.sort(key=lambda x: (x["_split"], x["file_name"]))
     return cat_by_split_and_id, anns_by_split_and_image, image_infos
+
+
+def is_image_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in TRIAL3_IMAGE_SUFFIXES and not path.name.startswith("._")
+
+
+def find_mask_for_image(image_path: Path) -> Path | None:
+    if TRIAL3_MASK_DIR is None:
+        return None
+    for suffix in TRIAL3_IMAGE_SUFFIXES + (".png", ".tif", ".tiff"):
+        candidate = TRIAL3_MASK_DIR / f"{image_path.stem}{suffix}"
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def parse_tile_geometry(file_name: str) -> Dict[str, int | float]:
+    match = re.search(r"(?:^|[_-])x(?P<x>\d+)[_-]y(?P<y>\d+)[_-]w(?P<w>\d+)[_-]h(?P<h>\d+)", file_name)
+    if not match:
+        return {"tile_x": np.nan, "tile_y": np.nan, "tile_w": np.nan, "tile_h": np.nan}
+    return {
+        "tile_x": int(match.group("x")),
+        "tile_y": int(match.group("y")),
+        "tile_w": int(match.group("w")),
+        "tile_h": int(match.group("h")),
+    }
+
+
+def load_image_dir() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], List[dict]], List[dict]]:
+    assert TRIAL3_IMAGE_DIR is not None
+    assert_path(TRIAL3_IMAGE_DIR, "tile image directory")
+    if TRIAL3_MASK_DIR is not None:
+        assert_path(TRIAL3_MASK_DIR, "optional tile mask directory")
+
+    image_infos = []
+    image_files = sorted(p for p in TRIAL3_IMAGE_DIR.iterdir() if is_image_file(p))
+    for idx, image_path in enumerate(image_files, start=1):
+        with Image.open(image_path) as image:
+            width, height = image.size
+        mask_path = find_mask_for_image(image_path)
+        image_infos.append(
+            {
+                "id": idx,
+                "file_name": image_path.name,
+                "width": int(width),
+                "height": int(height),
+                **parse_tile_geometry(image_path.name),
+                "_split": TRIAL3_IMAGE_SPLIT,
+                "_source": "image_dir",
+                "_image_path": str(image_path),
+                "_gt_mask_path": str(mask_path) if mask_path else "",
+            }
+        )
+    if not image_infos:
+        raise FileNotFoundError(f"No image files with suffixes {TRIAL3_IMAGE_SUFFIXES} found in {TRIAL3_IMAGE_DIR}")
+    return {}, {}, image_infos
+
+
+def load_inputs() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], List[dict]], List[dict]]:
+    return load_image_dir() if USE_IMAGE_DIR else load_coco()
 
 
 def select_images(image_infos: Sequence[dict]) -> List[dict]:
@@ -225,6 +305,76 @@ def gt_mask_for_categories(
     return out
 
 
+def read_instance_mask(path: Path, image_rgb: np.ndarray) -> np.ndarray:
+    mask = np.asarray(Image.open(path))
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    mask = resize_mask_to_image(mask.astype(np.uint16), image_rgb)
+    return mask.astype(np.uint16)
+
+
+def load_gt_masks_for_image(
+    image_info: dict,
+    image_rgb: np.ndarray,
+    cat_by_split_and_id: Dict[Tuple[str, int], str],
+    anns_by_split_and_image: Dict[Tuple[str, int], List[dict]],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, bool], str]:
+    height, width = image_rgb.shape[:2]
+    empty = np.zeros((height, width), dtype=np.uint16)
+
+    mask_path_raw = str(image_info.get("_gt_mask_path", "") or "")
+    if mask_path_raw:
+        gt_all = read_instance_mask(Path(mask_path_raw), image_rgb)
+        return (
+            empty.copy(),
+            empty.copy(),
+            gt_all,
+            {
+                "SAM3_clear_vs_GT_clear": False,
+                "CellSeg1_residual_compact_vs_GT_compact": False,
+                "Hybrid_vs_GT_all_boundaries": True,
+            },
+            "mask_dir",
+        )
+
+    if image_info.get("_source") == "coco":
+        gt_clear = gt_mask_for_categories(
+            image_info, {"clear_cell_boundary"}, cat_by_split_and_id, anns_by_split_and_image
+        )
+        gt_compact = gt_mask_for_categories(
+            image_info, {"compact_cell_boundary"}, cat_by_split_and_id, anns_by_split_and_image
+        )
+        gt_all = gt_mask_for_categories(
+            image_info,
+            {"clear_cell_boundary", "compact_cell_boundary"},
+            cat_by_split_and_id,
+            anns_by_split_and_image,
+        )
+        return (
+            gt_clear,
+            gt_compact,
+            gt_all,
+            {
+                "SAM3_clear_vs_GT_clear": True,
+                "CellSeg1_residual_compact_vs_GT_compact": True,
+                "Hybrid_vs_GT_all_boundaries": True,
+            },
+            "coco",
+        )
+
+    return (
+        empty.copy(),
+        empty.copy(),
+        empty.copy(),
+        {
+            "SAM3_clear_vs_GT_clear": False,
+            "CellSeg1_residual_compact_vs_GT_compact": False,
+            "Hybrid_vs_GT_all_boundaries": False,
+        },
+        "unavailable",
+    )
+
+
 def resize_mask_to_image(mask: np.ndarray, img_rgb: np.ndarray) -> np.ndarray:
     height, width = img_rgb.shape[:2]
     if mask.shape[:2] == (height, width):
@@ -278,6 +428,32 @@ def binary_metrics(gt_mask: np.ndarray, pred_mask: np.ndarray) -> dict:
         "gt_instances": int(gt_mask.max()),
         "pred_instances": int(pred_mask.max()),
     }
+
+
+def unavailable_gt_metrics(gt_mask: np.ndarray, pred_mask: np.ndarray) -> dict:
+    pred = pred_mask > 0
+    gt = gt_mask > 0
+    return {
+        "tp_px": np.nan,
+        "fp_px": np.nan,
+        "fn_px": np.nan,
+        "tn_px": np.nan,
+        "dice": np.nan,
+        "iou": np.nan,
+        "precision": np.nan,
+        "recall_sensitivity": np.nan,
+        "specificity": np.nan,
+        "gt_area_px": int(gt.sum()),
+        "pred_area_px": int(pred.sum()),
+        "gt_instances": int(gt_mask.max()) if gt_mask.size else 0,
+        "pred_instances": int(pred_mask.max()) if pred_mask.size else 0,
+    }
+
+
+def metrics_with_gt_availability(gt_mask: np.ndarray, pred_mask: np.ndarray, gt_available: bool) -> dict:
+    row = binary_metrics(gt_mask, pred_mask) if gt_available else unavailable_gt_metrics(gt_mask, pred_mask)
+    row["gt_available"] = bool(gt_available)
+    return row
 
 
 def relabel_instance_mask(mask: np.ndarray) -> np.ndarray:
@@ -673,6 +849,8 @@ def extract_morphology_rows(
     split: str,
     tile_id: str,
     file_name: str,
+    image_path: Path,
+    tile_geometry: Dict[str, int | float],
 ) -> List[dict]:
     source_by_final_label = {int(row["final_label"]): row for row in final_rows}
     rows = []
@@ -702,6 +880,8 @@ def extract_morphology_rows(
                 "split": split,
                 "tile_id": tile_id,
                 "file_name": file_name,
+                "image_path": str(image_path),
+                **tile_geometry,
                 "final_label": final_label,
                 "final_class_id": final_class_id,
                 "final_class_name": final_class_name,
@@ -779,15 +959,22 @@ def save_csv(path: Path, rows: List[dict]) -> None:
 
 
 def main() -> None:
-    for path, label in [
-        (COCO_ROOT, "COCO root"),
+    required_paths = [
         (SAM3_REPO, "SAM3 repo"),
         (SAM31_CHECKPOINT, "SAM3 checkpoint"),
         (CELLSEG1_REPO, "CellSeg1 repo"),
         (CELLSEG1_CONFIG_PATH, "CellSeg1 config"),
         (CELLSEG1_LORA, "CellSeg1 LoRA checkpoint"),
         (YOLO_MODEL_PATH, "YOLO model"),
-    ]:
+    ]
+    if USE_IMAGE_DIR:
+        required_paths.append((TRIAL3_IMAGE_DIR, "tile image directory"))
+        if TRIAL3_MASK_DIR is not None:
+            required_paths.append((TRIAL3_MASK_DIR, "optional tile mask directory"))
+    else:
+        required_paths.append((COCO_ROOT, "COCO root"))
+
+    for path, label in required_paths:
         assert_path(path, label)
 
     PRED_MASK_DIR.mkdir(parents=True, exist_ok=True)
@@ -796,10 +983,14 @@ def main() -> None:
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
-    cat_by_split_and_id, anns_by_split_and_image, all_images = load_coco()
+    cat_by_split_and_id, anns_by_split_and_image, all_images = load_inputs()
     trial_images = select_images(all_images)
 
     print("Trial Run 3 output:", OUT_DIR)
+    print("Input mode:", "image_dir" if USE_IMAGE_DIR else "coco")
+    if USE_IMAGE_DIR:
+        print("Tile image directory:", TRIAL3_IMAGE_DIR)
+        print("Optional mask directory:", TRIAL3_MASK_DIR or "(not set)")
     print("Selected images:", len(trial_images), [f"{x['_split']}_{Path(x['file_name']).stem}" for x in trial_images])
     print("SAM3 prompts:", SAM31_CLEAR_PROMPTS)
     print("SAM3 score threshold:", SAM31_SCORE_THRESH)
@@ -820,22 +1011,17 @@ def main() -> None:
         split = image_info["_split"]
         tile_id = Path(image_info["file_name"]).stem
         tile_key = f"{split}_{tile_id}"
-        image_path = COCO_ROOT / split / image_info["file_name"]
+        image_path = Path(image_info["_image_path"])
+        tile_geometry = {key: image_info.get(key, np.nan) for key in ("tile_x", "tile_y", "tile_w", "tile_h")}
         print("\n" + "=" * 100)
         print("Trial 3 running:", tile_key)
         started = time.time()
 
         pil_image = Image.open(image_path).convert("RGB")
         original_rgb = np.asarray(pil_image)
-        gt_clear = gt_mask_for_categories(
-            image_info, {"clear_cell_boundary"}, cat_by_split_and_id, anns_by_split_and_image
-        )
-        gt_compact = gt_mask_for_categories(
-            image_info, {"compact_cell_boundary"}, cat_by_split_and_id, anns_by_split_and_image
-        )
-        gt_all = gt_mask_for_categories(
+        gt_clear, gt_compact, gt_all, gt_available_by_model, gt_source = load_gt_masks_for_image(
             image_info,
-            {"clear_cell_boundary", "compact_cell_boundary"},
+            original_rgb,
             cat_by_split_and_id,
             anns_by_split_and_image,
         )
@@ -860,6 +1046,8 @@ def main() -> None:
                 split,
                 tile_id,
                 image_info["file_name"],
+                image_path,
+                tile_geometry,
             )
         )
 
@@ -881,7 +1069,11 @@ def main() -> None:
             ("CellSeg1_residual_compact_vs_GT_compact", compact_candidate, gt_compact),
             ("Hybrid_vs_GT_all_boundaries", hybrid_mask, gt_all),
         ]:
-            row = binary_metrics(gt_mask, pred_mask)
+            row = metrics_with_gt_availability(
+                gt_mask,
+                pred_mask,
+                gt_available_by_model.get(model_name, False),
+            )
             row.update(
                 {
                     "trial": TRIAL3_NAME,
@@ -889,6 +1081,9 @@ def main() -> None:
                     "split": split,
                     "tile_id": tile_id,
                     "file_name": image_info["file_name"],
+                    "image_path": str(image_path),
+                    **tile_geometry,
+                    "gt_source": gt_source,
                     "inference_time_sec": elapsed,
                     "yolo_nucleus_instances": int(nucleus_mask.max()),
                     "sam31_clear_instances": int(sam_clear.max()),
@@ -909,10 +1104,28 @@ def main() -> None:
             metrics_rows.append(row)
 
         for row in nucleus_rows + sam_rows + compact_rows:
-            row.update({"trial": TRIAL3_NAME, "split": split, "tile_id": tile_id, "file_name": image_info["file_name"]})
+            row.update(
+                {
+                    "trial": TRIAL3_NAME,
+                    "split": split,
+                    "tile_id": tile_id,
+                    "file_name": image_info["file_name"],
+                    "image_path": str(image_path),
+                    **tile_geometry,
+                }
+            )
             source_instance_rows.append(row)
         for row in final_rows:
-            row.update({"trial": TRIAL3_NAME, "split": split, "tile_id": tile_id, "file_name": image_info["file_name"]})
+            row.update(
+                {
+                    "trial": TRIAL3_NAME,
+                    "split": split,
+                    "tile_id": tile_id,
+                    "file_name": image_info["file_name"],
+                    "image_path": str(image_path),
+                    **tile_geometry,
+                }
+            )
             final_instance_rows.append(row)
 
         panels = [
@@ -924,7 +1137,7 @@ def main() -> None:
         ]
         titles = [
             f"{tile_key}: original",
-            f"GT all n={int(gt_all.max())}",
+            f"GT all n={int(gt_all.max())}" if gt_available_by_model.get("Hybrid_vs_GT_all_boundaries", False) else "GT unavailable",
             f"SAM3 clear n={int(sam_clear.max())}",
             f"CellSeg1 residual compact n={int(compact_candidate.max())}",
             f"Hybrid n={int(hybrid_mask.max())}",
