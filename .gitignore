@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+
+# Outputs and large experiment artifacts
+outputs/
+pred_masks/
+comparison_images/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Local data/checkouts should stay outside this inference repo
+dataset/
+data/
+sam3/
+cellseg1_repo/
