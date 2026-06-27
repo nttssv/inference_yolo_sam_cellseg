@@ -23,7 +23,7 @@ import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -326,10 +326,26 @@ def expected_output_paths(tile_key: str) -> Dict[str, Path]:
     }
 
 
-def should_skip_tile(tile_key: str) -> bool:
+def all_expected_outputs_exist(tile_key: str) -> bool:
+    return all(path.exists() for path in expected_output_paths(tile_key).values())
+
+
+def metric_tile_keys_with_complete_rows(metrics_rows: Sequence[dict]) -> Set[str]:
+    counts: Dict[str, int] = {}
+    for row in metrics_rows:
+        split = row.get("split")
+        tile_id = row.get("tile_id")
+        if pd.isna(split) or pd.isna(tile_id):
+            continue
+        tile_key = f"{split}_{tile_id}"
+        counts[tile_key] = counts.get(tile_key, 0) + 1
+    return {tile_key for tile_key, count in counts.items() if count >= 3}
+
+
+def should_skip_tile(tile_key: str, completed_metric_tile_keys: Set[str]) -> bool:
     if not TRIAL3_SKIP_EXISTING:
         return False
-    return expected_output_paths(tile_key)["hybrid"].exists()
+    return all_expected_outputs_exist(tile_key) and tile_key in completed_metric_tile_keys
 
 
 def decode_coco_segmentation(segmentation, height: int, width: int) -> np.ndarray:
@@ -1109,6 +1125,27 @@ def load_cellseg1():
     cellseg_config["stability_score_thresh"] = CELLSEG1_STABILITY_THRESH
     cellseg_config["deterministic"] = False
 
+    env_overrides = {
+        "TRIAL3_CELLSEG1_POINTS_PER_SIDE": ("points_per_side", int),
+        "TRIAL3_CELLSEG1_POINTS_PER_BATCH": ("points_per_batch", int),
+        "TRIAL3_CELLSEG1_CROP_N_LAYERS": ("crop_n_layers", int),
+        "TRIAL3_CELLSEG1_CROP_N_POINTS_DOWNSCALE_FACTOR": ("crop_n_points_downscale_factor", int),
+        "TRIAL3_CELLSEG1_BOX_NMS_THRESH": ("box_nms_thresh", float),
+        "TRIAL3_CELLSEG1_CROP_NMS_THRESH": ("crop_nms_thresh", float),
+        "TRIAL3_CELLSEG1_MIN_MASK_REGION_AREA": ("min_mask_region_area", int),
+        "TRIAL3_CELLSEG1_MAX_MASK_REGION_AREA_RATIO": ("max_mask_region_area_ratio", float),
+        "TRIAL3_CELLSEG1_STABILITY_SCORE_OFFSET": ("stability_score_offset", float),
+    }
+    applied_overrides = {}
+    for env_name, (config_key, caster) in env_overrides.items():
+        raw_value = os.getenv(env_name)
+        if raw_value is None or raw_value == "":
+            continue
+        cellseg_config[config_key] = caster(raw_value)
+        applied_overrides[config_key] = cellseg_config[config_key]
+    if applied_overrides:
+        print("CellSeg1 env overrides:", applied_overrides, flush=True)
+
     set_env(
         cellseg_config["deterministic"],
         cellseg_config["seed"],
@@ -1131,6 +1168,26 @@ def load_cellseg1():
         max_mask_region_area_ratio=cellseg_config["max_mask_region_area_ratio"],
         stability_score_thresh=cellseg_config["stability_score_thresh"],
         stability_score_offset=cellseg_config["stability_score_offset"],
+    )
+    print(
+        "CellSeg1 generator config:",
+        {
+            key: cellseg_config.get(key)
+            for key in (
+                "resize_size",
+                "points_per_side",
+                "points_per_batch",
+                "crop_n_layers",
+                "crop_n_points_downscale_factor",
+                "box_nms_thresh",
+                "crop_nms_thresh",
+                "pred_iou_thresh",
+                "stability_score_thresh",
+                "min_mask_region_area",
+                "max_mask_region_area_ratio",
+            )
+        },
+        flush=True,
     )
     return cellseg_config, read_image_to_numpy, resize_image, mask_generator, sam_output_to_mask
 
@@ -1238,6 +1295,7 @@ def main() -> None:
     source_instance_rows: List[dict] = load_existing_csv_rows(source_csv)
     final_instance_rows: List[dict] = load_existing_csv_rows(final_csv)
     morphology_rows: List[dict] = load_existing_csv_rows(morphology_csv)
+    completed_metric_tile_keys = metric_tile_keys_with_complete_rows(metrics_rows)
     pending_metrics_rows: List[dict] = []
     pending_source_instance_rows: List[dict] = []
     pending_final_instance_rows: List[dict] = []
@@ -1248,7 +1306,7 @@ def main() -> None:
         split = image_info["_split"]
         tile_id = Path(image_info["file_name"]).stem
         tile_key = f"{split}_{tile_id}"
-        if should_skip_tile(tile_key):
+        if should_skip_tile(tile_key, completed_metric_tile_keys):
             print("\n" + "=" * 100)
             print(f"Skipping existing tile: {tile_key}")
             print("Existing hybrid mask:", expected_output_paths(tile_key)["hybrid"])
@@ -1258,6 +1316,11 @@ def main() -> None:
         tile_geometry = {key: image_info.get(key, np.nan) for key in ("tile_x", "tile_y", "tile_w", "tile_h")}
         print("\n" + "=" * 100)
         print("Trial 3 running:", tile_key)
+        if TRIAL3_SKIP_EXISTING and all_expected_outputs_exist(tile_key):
+            print(
+                f"{tile_key} | Recomputing existing outputs because metrics CSV rows are incomplete or missing",
+                flush=True,
+            )
         started = time.time()
 
         pil_image = Image.open(image_path).convert("RGB")
@@ -1271,6 +1334,8 @@ def main() -> None:
 
         nucleus_mask, nucleus_rows = yolo_nucleus_mask(yolo_model, image_path, original_rgb, tile_key=tile_key)
         sam_clear, sam_rows = sam3_clear_mask(processor, pil_image, original_rgb, tile_key=tile_key)
+        cellseg_started = time.time()
+        print(f"{tile_key} | CellSeg1 generate start", flush=True)
         _, cellseg_raw = cellseg1_predict_one(
             image_path,
             cellseg_config,
@@ -1279,6 +1344,7 @@ def main() -> None:
             cellseg_mask_generator,
             sam_output_to_mask,
         )
+        print(f"{tile_key} | CellSeg1 generate done sec={time.time() - cellseg_started:.2f}", flush=True)
         cellseg_raw = resize_mask_to_image(cellseg_raw, original_rgb)
         compact_candidate, compact_rows = filter_cellseg_compact_candidates(
             cellseg_raw, sam_clear, nucleus_mask, original_rgb
