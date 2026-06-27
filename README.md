@@ -17,6 +17,10 @@ The script writes segmentation metrics, per-instance provenance, comparison pane
 and per-cell morphology features including cell area, nucleus area, cytoplasm area,
 and N/C ratio.
 
+YOLO, SAM3.1, and CellSeg1 are loaded once per worker. CellSeg1 keeps a cached
+mask generator for all tiles assigned to that worker instead of rebuilding the
+model for every tile.
+
 ## Clone On GPU Cluster
 
 ```bash

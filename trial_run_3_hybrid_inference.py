@@ -6,8 +6,7 @@ Pipeline:
 - SAM3.1 predicts clear-cell boundary candidates.
 - CellSeg1 predicts dense cell-boundary candidates, used as residual compact
   candidates after removing overlap with SAM3 clear candidates.
-- YOLO nuclei gate only CellSeg1 compact candidates. SAM3.1 clear candidates
-  are kept by score, area, and duplicate/NMS filtering.
+- YOLO nuclei gate CellSeg1 compact candidates and every final merged cell.
 
 This script is intentionally path-defaulted for the SUTD GPU cluster layout used
 in this project, while every important path can still be overridden with env vars.
@@ -797,9 +796,21 @@ def sam3_clear_mask(
     return pred, rows
 
 
-def cellseg1_predict_one(image_path: Path, cellseg_config: dict, read_image_to_numpy, resize_image, predict_images) -> Tuple[np.ndarray, np.ndarray]:
+def cellseg1_predict_one(
+    image_path: Path,
+    cellseg_config: dict,
+    read_image_to_numpy,
+    resize_image,
+    mask_generator,
+    sam_output_to_mask,
+) -> Tuple[np.ndarray, np.ndarray]:
     image = resize_image(read_image_to_numpy(image_path), cellseg_config["resize_size"])
-    pred = predict_images(cellseg_config, [image])[0]
+    with torch.no_grad():
+        output = mask_generator.generate(image)
+    if output == []:
+        pred = np.zeros_like(image[:, :, 0], dtype=np.uint16)
+    else:
+        pred = sam_output_to_mask(output)
     return image, pred.astype(np.uint16)
 
 
@@ -1087,7 +1098,9 @@ def load_cellseg1():
     if str(CELLSEG1_REPO) not in sys.path:
         sys.path.insert(0, str(CELLSEG1_REPO))
     from data.utils import read_image_to_numpy, resize_image
-    from predict import predict_images
+    from predict import load_model_from_config, sam_output_to_mask
+    from segment_anything import SamAutomaticMaskGeneratorOptMaskNMS
+    from set_environment import set_env
 
     with CELLSEG1_CONFIG_PATH.open("r") as handle:
         cellseg_config = yaml.safe_load(handle)
@@ -1095,7 +1108,31 @@ def load_cellseg1():
     cellseg_config["pred_iou_thresh"] = CELLSEG1_IOU_THRESH
     cellseg_config["stability_score_thresh"] = CELLSEG1_STABILITY_THRESH
     cellseg_config["deterministic"] = False
-    return cellseg_config, read_image_to_numpy, resize_image, predict_images
+
+    set_env(
+        cellseg_config["deterministic"],
+        cellseg_config["seed"],
+        cellseg_config["allow_tf32_on_cudnn"],
+        cellseg_config["allow_tf32_on_matmul"],
+    )
+    model = load_model_from_config(cellseg_config, empty_lora=False)
+    model.eval()
+    model_sam = model.sam if hasattr(model, "sam") else model
+    mask_generator = SamAutomaticMaskGeneratorOptMaskNMS(
+        model=model_sam,
+        points_per_side=cellseg_config["points_per_side"],
+        points_per_batch=cellseg_config["points_per_batch"],
+        crop_n_layers=cellseg_config["crop_n_layers"],
+        crop_n_points_downscale_factor=cellseg_config["crop_n_points_downscale_factor"],
+        box_nms_thresh=cellseg_config["box_nms_thresh"],
+        crop_nms_thresh=cellseg_config["crop_nms_thresh"],
+        pred_iou_thresh=cellseg_config["pred_iou_thresh"],
+        min_mask_region_area=cellseg_config["min_mask_region_area"],
+        max_mask_region_area_ratio=cellseg_config["max_mask_region_area_ratio"],
+        stability_score_thresh=cellseg_config["stability_score_thresh"],
+        stability_score_offset=cellseg_config["stability_score_offset"],
+    )
+    return cellseg_config, read_image_to_numpy, resize_image, mask_generator, sam_output_to_mask
 
 
 def save_csv(path: Path, rows: List[dict]) -> None:
@@ -1193,8 +1230,8 @@ def main() -> None:
     print("YOLO names:", yolo_model.names, flush=True)
     log_step("loading SAM3 processor")
     processor = load_sam3_processor()
-    log_step("loading CellSeg1 predictor")
-    cellseg_config, read_image_to_numpy, resize_image, predict_images = load_cellseg1()
+    log_step("loading cached CellSeg1 predictor")
+    cellseg_config, read_image_to_numpy, resize_image, cellseg_mask_generator, sam_output_to_mask = load_cellseg1()
     print("CellSeg1 LoRA:", cellseg_config["result_pth_path"], flush=True)
 
     metrics_rows: List[dict] = load_existing_csv_rows(metrics_csv)
@@ -1235,7 +1272,12 @@ def main() -> None:
         nucleus_mask, nucleus_rows = yolo_nucleus_mask(yolo_model, image_path, original_rgb, tile_key=tile_key)
         sam_clear, sam_rows = sam3_clear_mask(processor, pil_image, original_rgb, tile_key=tile_key)
         _, cellseg_raw = cellseg1_predict_one(
-            image_path, cellseg_config, read_image_to_numpy, resize_image, predict_images
+            image_path,
+            cellseg_config,
+            read_image_to_numpy,
+            resize_image,
+            cellseg_mask_generator,
+            sam_output_to_mask,
         )
         cellseg_raw = resize_mask_to_image(cellseg_raw, original_rgb)
         compact_candidate, compact_rows = filter_cellseg_compact_candidates(
