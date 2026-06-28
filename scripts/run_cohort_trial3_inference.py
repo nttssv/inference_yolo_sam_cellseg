@@ -149,6 +149,7 @@ def settings_from_config(config: dict[str, Any]) -> dict[str, Any]:
         "kill_timeout_seconds": int(cohort.get("kill_timeout_seconds", 30)),
         "max_restarts": int(cohort.get("max_restarts", -1)),
         "continue_on_error": bool(cohort.get("continue_on_error", False)),
+        "preflight_paths": bool(cohort.get("preflight_paths", True)),
         "image_suffixes": image_suffixes,
         "refresh_seconds": int(monitor.get("refresh_seconds", 5)),
         "log_tail_lines": int(monitor.get("log_tail_lines", 40)),
@@ -168,6 +169,8 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         cohort["poll_seconds"] = args.poll_seconds
     if args.stale_seconds is not None:
         cohort["stale_seconds"] = args.stale_seconds
+    if args.no_preflight:
+        cohort["preflight_paths"] = False
     return config
 
 
@@ -424,6 +427,38 @@ def build_worker_env(
         }
     )
     return env
+
+
+def validate_external_paths(env: dict[str, str]) -> None:
+    cellseg_run_raw = env.get("CELLSEG1_RUN_DIR", "")
+    cellseg_run_dir = Path(cellseg_run_raw).expanduser()
+    checks = {
+        "SAM3 repo": (env.get("SAM3_REPO", ""), Path(env.get("SAM3_REPO", "")).expanduser()),
+        "SAM3 checkpoint": (
+            env.get("SAM31_CHECKPOINT", ""),
+            Path(env.get("SAM31_CHECKPOINT", "")).expanduser(),
+        ),
+        "YOLO model": (
+            env.get("YOLO_MODEL_PATH", ""),
+            Path(env.get("YOLO_MODEL_PATH", "")).expanduser(),
+        ),
+        "CellSeg1 repo": (
+            env.get("CELLSEG1_REPO", ""),
+            Path(env.get("CELLSEG1_REPO", "")).expanduser(),
+        ),
+        "CellSeg1 run dir": (cellseg_run_raw, cellseg_run_dir),
+        "CellSeg1 config": (
+            env.get("CELLSEG1_CONFIG_PATH") or str(cellseg_run_dir / "cellseg1_cgh_p2_runtime_config.yaml"),
+            Path(env.get("CELLSEG1_CONFIG_PATH") or cellseg_run_dir / "cellseg1_cgh_p2_runtime_config.yaml").expanduser(),
+        ),
+        "CellSeg1 LoRA": (
+            env.get("CELLSEG1_LORA") or str(cellseg_run_dir / "sam_lora_cgh_p2_cell_boundary.pth"),
+            Path(env.get("CELLSEG1_LORA") or cellseg_run_dir / "sam_lora_cgh_p2_cell_boundary.pth").expanduser(),
+        ),
+    }
+    missing = [f"{label}: {path}" for label, (raw, path) in checks.items() if not str(raw).strip() or not path.exists()]
+    if missing:
+        raise FileNotFoundError("preflight missing required paths:\n- " + "\n- ".join(missing))
 
 
 def close_log_handle(state: WorkerRuntime) -> None:
@@ -684,6 +719,45 @@ def parse_current_tile_from_log(path: Path) -> str:
     return current
 
 
+def log_phase_and_latest(path: Path) -> tuple[str, str]:
+    tail = read_log_tail(path, lines=160)
+    phase = "waiting_for_log"
+    latest = ""
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        latest = stripped
+        lowered = stripped.lower()
+        if "traceback" in lowered or "error" in lowered or "exception" in lowered:
+            phase = "error"
+        elif "trial run 3 complete" in lowered:
+            phase = "complete"
+        elif "cellseg1 generate start" in lowered:
+            phase = "cellseg1_running"
+        elif "cellseg1 generate done" in lowered:
+            phase = "cellseg1_done"
+        elif "sam3.1 clear" in lowered:
+            phase = "sam3_running"
+        elif "yolo nucleus" in lowered:
+            phase = "yolo_running"
+        elif "trial 3 running:" in lowered:
+            phase = "tile_running"
+        elif "loading cached cellseg1 predictor" in lowered or "cellseg1 lora" in lowered:
+            phase = "loading_cellseg1"
+        elif "loading sam3 processor" in lowered:
+            phase = "loading_sam3"
+        elif "loading yolo model" in lowered:
+            phase = "loading_yolo"
+        elif "loading input index" in lowered:
+            phase = "indexing_inputs"
+        elif "checking " in lowered:
+            phase = "checking_paths"
+        elif "main started" in lowered or "trial3 bootstrap" in lowered:
+            phase = "started"
+    return phase, latest
+
+
 def write_preview(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -729,6 +803,7 @@ def worker_status_payload(
     timing_rows = read_timing_rows(worker_timing_path(slide_dir, worker_id))
     latest_comparison = latest_file(out_dir / "comparison_images", "*_trial3_compare.png")
     latest_mask = latest_file(out_dir / "pred_masks", f"*{HYBRID_SUFFIX}")
+    phase, latest_log_line = log_phase_and_latest(log_path)
     current_tile = parse_current_tile_from_log(log_path) or tile_key_from_hybrid_mask(latest_mask)
     if not current_tile:
         completed_keys = tile_keys_with_complete_outputs(out_dir)
@@ -743,6 +818,7 @@ def worker_status_payload(
         "worker_id": worker_id,
         "slide_name": slide_name,
         "status": status,
+        "phase": phase,
         "current_tile": current_tile,
         "tiles_done": tiles_done,
         "tiles_total": tiles_total,
@@ -756,6 +832,7 @@ def worker_status_payload(
         "elapsed_seconds": round(elapsed, 3),
         **compute_eta(timing_rows, tiles_done, tiles_total),
         "tiles_per_minute": round(tiles_per_minute, 4),
+        "latest_log_line": latest_log_line,
         "error": error or (state.error if state else ""),
     }
     atomic_write_json(worker_status_path(slide_dir, worker_id), payload)
@@ -860,20 +937,22 @@ def merge_worker_csvs(slide_dir: Path, workers: int, slide_name: str) -> dict[st
     if not merged_features.empty and {"split", "final_class_name", "source_model", "final_label"}.issubset(
         merged_features.columns
     ):
+        agg_specs = {"n_cells": ("final_label", "count")}
+        optional_aggs = {
+            "cell_area_px_mean": ("cell_area_px", "mean"),
+            "cell_area_px_std": ("cell_area_px", "std"),
+            "nucleus_area_px_mean": ("nucleus_area_px", "mean"),
+            "cytoplasm_area_px_mean": ("cytoplasm_area_px", "mean"),
+            "nc_ratio_mean": ("nc_ratio", "mean"),
+            "nc_ratio_std": ("nc_ratio", "std"),
+            "nucleus_count_mean": ("nucleus_count", "mean"),
+            "cell_equiv_diameter_px_mean": ("cell_equiv_diameter_px", "mean"),
+            "nucleus_equiv_diameter_px_mean": ("nucleus_equiv_diameter_px", "mean"),
+        }
+        agg_specs.update({name: spec for name, spec in optional_aggs.items() if spec[0] in merged_features.columns})
         summary = (
             merged_features.groupby(["slide_name", "split", "final_class_name", "source_model"])
-            .agg(
-                n_cells=("final_label", "count"),
-                cell_area_px_mean=("cell_area_px", "mean"),
-                cell_area_px_std=("cell_area_px", "std"),
-                nucleus_area_px_mean=("nucleus_area_px", "mean"),
-                cytoplasm_area_px_mean=("cytoplasm_area_px", "mean"),
-                nc_ratio_mean=("nc_ratio", "mean"),
-                nc_ratio_std=("nc_ratio", "std"),
-                nucleus_count_mean=("nucleus_count", "mean"),
-                cell_equiv_diameter_px_mean=("cell_equiv_diameter_px", "mean"),
-                nucleus_equiv_diameter_px_mean=("nucleus_equiv_diameter_px", "mean"),
-            )
+            .agg(**agg_specs)
             .reset_index()
         )
         summary.to_csv(summary_path, index=False)
@@ -912,6 +991,16 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
     workers = settings["workers"]
     slide_dir = slide_out_dir(settings, slide_name)
     ensure_slide_dirs(slide_dir, workers)
+    if settings["preflight_paths"]:
+        preflight_env = build_worker_env(
+            config,
+            settings,
+            slide,
+            0,
+            tile_dir,
+            worker_out_dir(slide_dir, 0),
+        )
+        validate_external_paths(preflight_env)
     started_at = now_iso()
     states: dict[int, WorkerRuntime] = {}
     maps_by_worker: dict[int, dict[str, Path]] = {}
@@ -1005,6 +1094,16 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
             if process is None:
                 if restart_allowed(settings, state):
                     state.status = "restarting"
+                    state.error = f"worker process missing before completion at {completed}/{state.tiles_total}; restarting"
+                    print(f"[cohort] {slide_name} worker {worker_id:02d} {state.error}", flush=True)
+                    worker_status_payload(
+                        slide_name,
+                        slide_dir,
+                        worker_id,
+                        state.tiles_total,
+                        maps_by_worker[worker_id],
+                        state=state,
+                    )
                     launch_worker(config, settings, slide, state, tile_dir, slide_dir, restart=True)
                 else:
                     state.status = "failed"
@@ -1024,7 +1123,10 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
                 continue
 
             if return_code is not None:
-                state.error = f"worker exited rc={return_code} at {completed}/{state.tiles_total}"
+                state.error = (
+                    f"worker stopped before completion rc={return_code} at "
+                    f"{completed}/{state.tiles_total}; restarting with TRIAL3_SKIP_EXISTING=1"
+                )
                 current_tile = parse_current_tile_from_log(worker_log_path(slide_dir, worker_id))
                 if not state.failed_tile_recorded:
                     append_failed_timing(slide_dir, slide_name, worker_id, current_tile, state.error)
@@ -1316,6 +1418,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", help="override cohort.output_root")
     parser.add_argument("--poll-seconds", type=int, help="override cohort.poll_seconds")
     parser.add_argument("--stale-seconds", type=int, help="override cohort.stale_seconds")
+    parser.add_argument("--no-preflight", action="store_true", help="skip external model/source path checks before launch")
     parser.add_argument("--force-lock", action="store_true", help="ignore an existing stale run lock")
     return parser
 

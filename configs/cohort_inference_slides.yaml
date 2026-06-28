@@ -10,18 +10,19 @@ cohort:
   kill_timeout_seconds: 30
   max_restarts: -1
   continue_on_error: false
+  preflight_paths: true
   image_suffixes: [".png", ".jpg", ".jpeg", ".tif", ".tiff"]
 
 trial3:
   tile_keys: ALL
   skip_existing: 1
   save_comparisons: 1
-  comparison_every: 10
+  comparison_every: 5
   save_diagnostics: 0
   diagnostic_every: 1
   csv_append_every: 1
   vis_dpi: 120
-  traceback_after_seconds: 600
+  traceback_after_seconds: 180
   fast_image_index: 1
 
 monitor:
