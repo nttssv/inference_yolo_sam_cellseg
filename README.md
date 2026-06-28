@@ -241,6 +241,92 @@ tail -f "$HOME/Desktop/prototype5_whole_image_runs/trial_run_3_yolo_sam_cellseg/
 
 Stop the supervisor with `Ctrl-C`; it will terminate its worker processes.
 
+## Run Trial Run 3 inference on cohort tile folders
+
+The cohort runner processes the configured slide tile folders one slide at a
+time, starts sharded Trial Run 3 workers for each slide, writes worker status and
+preview files, and merges worker CSVs after each slide completes. It does not
+change the YOLO, SAM3.1, or CellSeg1 inference rules in
+`trial_run_3_hybrid_inference.py`.
+
+Set the external model/source paths first:
+
+```bash
+cd ~/Desktop/inference_yolo_sam_cellseg
+
+export SAM3_REPO="$HOME/Desktop/sam31-cgh-training-data/sam3"
+export SAM31_OUTPUT_ROOT="$HOME/Desktop/sam31-cgh-strategy2/outputs/strategy2_41tiles_full_unfreeze_20260625_160623"
+export SAM31_CHECKPOINT="$SAM31_OUTPUT_ROOT/checkpoints/checkpoint.pt"
+
+export YOLO_MODEL_PATH="$HOME/Desktop/sam31-cgh-training-data/training_data/reference_models/cellseg1_cgh_p2_yolo_best.pt"
+
+export CELLSEG1_REPO="$HOME/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_repo"
+export CELLSEG1_RUN_DIR="$HOME/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_cgh_p2_41full_20260625_124306"
+```
+
+Review the configured slides and tile counts:
+
+```bash
+python scripts/run_cohort_trial3_inference.py \
+  --config configs/cohort_inference_slides.yaml \
+  --dry-run
+```
+
+Run the cohort:
+
+```bash
+python scripts/run_cohort_trial3_inference.py \
+  --config configs/cohort_inference_slides.yaml \
+  --run
+```
+
+Useful overrides:
+
+```bash
+python scripts/run_cohort_trial3_inference.py \
+  --config configs/cohort_inference_slides.yaml \
+  --run \
+  --workers 2 \
+  --gpu-ids 0 \
+  --poll-seconds 30
+```
+
+The default output root is:
+
+```text
+~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/
+```
+
+Each slide output contains `worker_00/`, `worker_01/`, `merged/`, `preview/`,
+`logs/`, `_status/`, and one of `_RUNNING.json`, `_COMPLETED.json`, or
+`_FAILED.json`. Worker status files are written to:
+
+```text
+~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/_status/worker_<id>.json
+~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/_status/worker_<id>_timing.csv
+```
+
+Merged slide CSVs are written to:
+
+```text
+~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/merged/
+```
+
+Open the cohort dashboard notebook:
+
+```bash
+jupyter notebook notebooks/01_cohort_trial3_inference_monitor.ipynb
+```
+
+The notebook loads `configs/cohort_inference_slides.yaml`, shows a dry-run table,
+launches the same reusable script, and monitors status, latest previews, ETA,
+tiles/min, cells/sec, failed tiles, and recent logs. It is safe to reopen the
+notebook: running state is read from JSON status files, and the runner lock
+prevents duplicate active cohort runs.
+
+`MTO107` / `target_107` is included in the config as disabled and is skipped by
+default because it has already completed.
+
 ## Useful Parameters
 
 ```bash

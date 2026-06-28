@@ -1,0 +1,64 @@
+cohort:
+  output_root: ~/Desktop/Create_Cell_Atlas_Inference_Output
+  repo: .
+  inference_script: trial_run_3_hybrid_inference.py
+  workers: 2
+  gpu_ids: [0]
+  poll_seconds: 30
+  stale_seconds: 900
+  restart_delay_seconds: 20
+  kill_timeout_seconds: 30
+  max_restarts: -1
+  continue_on_error: false
+  image_suffixes: [".png", ".jpg", ".jpeg", ".tif", ".tiff"]
+
+trial3:
+  tile_keys: ALL
+  skip_existing: 1
+  save_comparisons: 1
+  comparison_every: 10
+  save_diagnostics: 0
+  diagnostic_every: 1
+  csv_append_every: 1
+  vis_dpi: 120
+  traceback_after_seconds: 600
+  fast_image_index: 1
+
+monitor:
+  refresh_seconds: 5
+  log_tail_lines: 40
+
+environment:
+  SAM3_REPO: ~/Desktop/sam31-cgh-training-data/sam3
+  SAM31_OUTPUT_ROOT: ~/Desktop/sam31-cgh-strategy2/outputs/strategy2_41tiles_full_unfreeze_20260625_160623
+  SAM31_CHECKPOINT: ~/Desktop/sam31-cgh-strategy2/outputs/strategy2_41tiles_full_unfreeze_20260625_160623/checkpoints/checkpoint.pt
+  YOLO_MODEL_PATH: ~/Desktop/sam31-cgh-training-data/training_data/reference_models/cellseg1_cgh_p2_yolo_best.pt
+  CELLSEG1_REPO: ~/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_repo
+  CELLSEG1_RUN_DIR: ~/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_cgh_p2_41full_20260625_124306
+
+slides:
+  - name: MTO110_26RR000079-A-03-01
+    tile_dir: ~/Desktop/Tile_Output/MTO110_26RR000079-A-03-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO118_26RR000079-A-11-01
+    tile_dir: ~/Desktop/Tile_Output/MTO118_26RR000079-A-11-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO130_26RR000079-A-04-01
+    tile_dir: ~/Desktop/Tile_Output/MTO130_26RR000079-A-04-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO135_26RR000079-A-07-01
+    tile_dir: ~/Desktop/Tile_Output/MTO135_26RR000079-A-07-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO153_26RR000079-A-09-01
+    tile_dir: ~/Desktop/Tile_Output/MTO153_26RR000079-A-09-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO160_26RR000079-A-05-01
+    tile_dir: ~/Desktop/Tile_Output/MTO160_26RR000079-A-05-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO166_26RR000079-A-13-01
+    tile_dir: ~/Desktop/Tile_Output/MTO166_26RR000079-A-13-01/tiles/accepted_tiles
+    enabled: true
+  - name: MTO107_target_107
+    tile_dir: ""
+    enabled: false
+    skip_reason: MTO107 / target_107 completed previously; skipped by default.
