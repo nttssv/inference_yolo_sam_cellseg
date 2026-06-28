@@ -41,6 +41,17 @@ OUTPUT_SUFFIXES = (
     "_sam31_clear_mask.png",
     "_cellseg1_residual_compact_mask.png",
 )
+MODEL_PATH_ENV_KEYS = {
+    "SAM3_REPO",
+    "SAM31_OUTPUT_ROOT",
+    "SAM31_CHECKPOINT",
+    "YOLO_MODEL_PATH",
+    "CELLSEG1_REPO",
+    "CELLSEG1_RUN_DIR",
+    "CELLSEG1_CONFIG_PATH",
+    "CELLSEG1_LORA",
+}
+DEFAULT_SAM31_OUTPUT_ROOT = REPO_ROOT / "outputs" / "strategy2_41tiles_full_unfreeze_20260625_160623"
 MERGE_SPECS = {
     "trial_run_3_metrics.csv": "merged_trial_run_3_metrics.csv",
     "trial_run_3_source_instances.csv": "merged_trial_run_3_source_instances.csv",
@@ -90,6 +101,17 @@ def expand_path(raw: str | Path | None, base: Path | None = None) -> Path | None
     if not path.is_absolute():
         path = (base or REPO_ROOT) / path
     return path.resolve()
+
+
+def expand_environment_value(key: str, value: Any) -> str:
+    text = os.path.expandvars(str(value)).strip()
+    if key in MODEL_PATH_ENV_KEYS:
+        return str(expand_path(text, REPO_ROOT) or text)
+    return text
+
+
+def resolve_env_path(raw: str | Path | None) -> Path | None:
+    return expand_path(raw, REPO_ROOT)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -156,6 +178,7 @@ def settings_from_config(config: dict[str, Any]) -> dict[str, Any]:
         "refresh_seconds": int(monitor.get("refresh_seconds", 5)),
         "log_tail_lines": int(monitor.get("log_tail_lines", 40)),
         "trial3": trial3,
+        "geojson_only": bool(trial3.get("geojson_only", False)),
     }
 
 
@@ -173,6 +196,11 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         cohort["stale_seconds"] = args.stale_seconds
     if args.no_preflight:
         cohort["preflight_paths"] = False
+    trial3 = config.setdefault("trial3", {})
+    if args.geojson_only:
+        trial3["geojson_only"] = 1
+    if args.overwrite_geojson:
+        trial3["overwrite_geojson"] = 1
     return config
 
 
@@ -397,15 +425,35 @@ def build_worker_env(
 ) -> dict[str, str]:
     trial3 = settings["trial3"]
     env = os.environ.copy()
+    config_path = config.get("_config_path")
+    if config_path:
+        env["TRIAL3_CONFIG"] = str(config_path)
+        env["TRIAL3_CONFIG_PATH"] = str(config_path)
+        env["TRIAL3_COHORT_CONFIG"] = str(config_path)
     for key, value in get_section(config, "environment").items():
         if value is None or str(value).strip() == "":
             continue
-        if not env.get(key):
-            env[key] = str(expand_path(value, REPO_ROOT) or value)
+        env[key] = expand_environment_value(key, value)
     for key, value in get_section(slide, "environment").items():
         if value is None or str(value).strip() == "":
             continue
-        env[key] = str(expand_path(value, REPO_ROOT) or value)
+        env[key] = expand_environment_value(key, value)
+
+    if not env.get("SAM31_OUTPUT_ROOT", "").strip():
+        env["SAM31_OUTPUT_ROOT"] = str(DEFAULT_SAM31_OUTPUT_ROOT.resolve(strict=False))
+    if not env.get("SAM31_CHECKPOINT", "").strip():
+        output_root = resolve_env_path(env["SAM31_OUTPUT_ROOT"]) or DEFAULT_SAM31_OUTPUT_ROOT
+        env["SAM31_CHECKPOINT"] = str((output_root / "checkpoints" / "checkpoint.pt").resolve(strict=False))
+    if env.get("CELLSEG1_RUN_DIR", "").strip():
+        cellseg_run_dir = resolve_env_path(env["CELLSEG1_RUN_DIR"])
+        if cellseg_run_dir is not None and not env.get("CELLSEG1_CONFIG_PATH", "").strip():
+            env["CELLSEG1_CONFIG_PATH"] = str(
+                (cellseg_run_dir / "cellseg1_cgh_p2_runtime_config.yaml").resolve(strict=False)
+            )
+        if cellseg_run_dir is not None and not env.get("CELLSEG1_LORA", "").strip():
+            env["CELLSEG1_LORA"] = str(
+                (cellseg_run_dir / "sam_lora_cgh_p2_cell_boundary.pth").resolve(strict=False)
+            )
     env.update(
         {
             "CUDA_VISIBLE_DEVICES": str(settings["gpu_ids"][worker_id % len(settings["gpu_ids"])]),
@@ -426,6 +474,11 @@ def build_worker_env(
             "TRIAL3_COMPARISON_EVERY": str(trial3.get("comparison_every", 10)),
             "TRIAL3_SAVE_DIAGNOSTICS": str(trial3.get("save_diagnostics", 0)),
             "TRIAL3_DIAGNOSTIC_EVERY": str(trial3.get("diagnostic_every", 1)),
+            "TRIAL3_SAVE_GEOJSON": str(trial3.get("save_geojson", 1)),
+            "TRIAL3_GEOJSON_COORDS": str(trial3.get("geojson_coords", "global")),
+            "TRIAL3_GEOJSON_ONLY": str(trial3.get("geojson_only", 0)),
+            "TRIAL3_OVERWRITE_GEOJSON": str(trial3.get("overwrite_geojson", 0)),
+            "TRIAL3_GEOJSON_APPROX_EPSILON": str(trial3.get("geojson_approx_epsilon", 0)),
             "TRIAL3_CSV_APPEND_EVERY": str(trial3.get("csv_append_every", 1)),
             "TRIAL3_VIS_DPI": str(trial3.get("vis_dpi", 120)),
             "TRIAL3_FAST_IMAGE_INDEX": str(trial3.get("fast_image_index", 1)),
@@ -439,35 +492,39 @@ def build_worker_env(
 
 
 def validate_external_paths(env: dict[str, str]) -> None:
-    cellseg_run_raw = env.get("CELLSEG1_RUN_DIR", "")
-    cellseg_run_dir = Path(cellseg_run_raw).expanduser()
-    checks = {
-        "SAM3 repo": (env.get("SAM3_REPO", ""), Path(env.get("SAM3_REPO", "")).expanduser()),
-        "SAM3 checkpoint": (
-            env.get("SAM31_CHECKPOINT", ""),
-            Path(env.get("SAM31_CHECKPOINT", "")).expanduser(),
-        ),
-        "YOLO model": (
-            env.get("YOLO_MODEL_PATH", ""),
-            Path(env.get("YOLO_MODEL_PATH", "")).expanduser(),
-        ),
-        "CellSeg1 repo": (
-            env.get("CELLSEG1_REPO", ""),
-            Path(env.get("CELLSEG1_REPO", "")).expanduser(),
-        ),
-        "CellSeg1 run dir": (cellseg_run_raw, cellseg_run_dir),
-        "CellSeg1 config": (
-            env.get("CELLSEG1_CONFIG_PATH") or str(cellseg_run_dir / "cellseg1_cgh_p2_runtime_config.yaml"),
-            Path(env.get("CELLSEG1_CONFIG_PATH") or cellseg_run_dir / "cellseg1_cgh_p2_runtime_config.yaml").expanduser(),
-        ),
-        "CellSeg1 LoRA": (
-            env.get("CELLSEG1_LORA") or str(cellseg_run_dir / "sam_lora_cgh_p2_cell_boundary.pth"),
-            Path(env.get("CELLSEG1_LORA") or cellseg_run_dir / "sam_lora_cgh_p2_cell_boundary.pth").expanduser(),
-        ),
-    }
-    missing = [f"{label}: {path}" for label, (raw, path) in checks.items() if not str(raw).strip() or not path.exists()]
+    checks = [
+        ("SAM3_REPO", "SAM3 repo", env.get("SAM3_REPO", "")),
+        ("SAM31_CHECKPOINT", "SAM3 checkpoint", env.get("SAM31_CHECKPOINT", "")),
+        ("YOLO_MODEL_PATH", "YOLO model", env.get("YOLO_MODEL_PATH", "")),
+        ("CELLSEG1_REPO", "CellSeg1 repo", env.get("CELLSEG1_REPO", "")),
+        ("CELLSEG1_CONFIG_PATH", "CellSeg1 config", env.get("CELLSEG1_CONFIG_PATH", "")),
+        ("CELLSEG1_LORA", "CellSeg1 LoRA", env.get("CELLSEG1_LORA", "")),
+    ]
+    missing = []
+    for variable, label, raw in checks:
+        path = resolve_env_path(raw) if str(raw).strip() else None
+        if path is not None and path.exists():
+            continue
+        missing.append(
+            "\n".join(
+                [
+                    "ERROR",
+                    "",
+                    variable,
+                    "",
+                    f"{label} resolved path:",
+                    str(path) if path is not None else "<empty>",
+                    "",
+                    "Generated by: worker environment",
+                    "",
+                    "File or directory does not exist.",
+                    "",
+                    "Please update your configuration.",
+                ]
+            )
+        )
     if missing:
-        raise FileNotFoundError("preflight missing required paths:\n- " + "\n- ".join(missing))
+        raise FileNotFoundError("preflight missing required paths:\n\n" + "\n\n".join(missing))
 
 
 def close_log_handle(state: WorkerRuntime) -> None:
@@ -989,6 +1046,18 @@ def merge_worker_csvs(slide_dir: Path, workers: int, slide_name: str) -> dict[st
         else:
             pd.DataFrame().to_csv(summary_path, index=False)
     outputs["trial_run_3_morphology_summary.csv"] = str(summary_path)
+    merged_geojson_dir = merged_dir / "geojson"
+    merged_geojson_dir.mkdir(parents=True, exist_ok=True)
+    geojson_count = 0
+    for worker_id in range(workers):
+        worker_geojson_dir = worker_out_dir(slide_dir, worker_id) / "geojson"
+        if not worker_geojson_dir.exists():
+            continue
+        for src_path in sorted(worker_geojson_dir.glob("*.geojson")):
+            shutil.copy2(src_path, merged_geojson_dir / src_path.name)
+            geojson_count += 1
+    outputs["geojson_dir"] = str(merged_geojson_dir)
+    outputs["geojson_files"] = str(geojson_count)
     return outputs
 
 
@@ -1011,7 +1080,7 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
     workers = settings["workers"]
     slide_dir = slide_out_dir(settings, slide_name)
     ensure_slide_dirs(slide_dir, workers)
-    if settings["preflight_paths"]:
+    if settings["preflight_paths"] and not settings["geojson_only"]:
         preflight_env = build_worker_env(
             config,
             settings,
@@ -1042,7 +1111,7 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
         completed = count_completed(worker_out_dir(slide_dir, worker_id))
         state.last_completed = completed
         state.last_progress_ts = time.time()
-        if completed >= state.tiles_total:
+        if completed >= state.tiles_total and not settings["geojson_only"]:
             state.status = "completed"
             worker_status_payload(
                 slide_name,
@@ -1098,7 +1167,11 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
 
             process = state.process
             return_code = None if process is None else process.poll()
-            worker_done = completed >= state.tiles_total and (process is None or return_code is not None)
+            geojson_only_done = settings["geojson_only"] and return_code == 0
+            worker_done = (
+                (completed >= state.tiles_total and (process is None or return_code is not None))
+                or geojson_only_done
+            )
             if worker_done:
                 state.status = "completed"
                 close_log_handle(state)
@@ -1470,6 +1543,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-seconds", type=int, help="override cohort.poll_seconds")
     parser.add_argument("--stale-seconds", type=int, help="override cohort.stale_seconds")
     parser.add_argument("--no-preflight", action="store_true", help="skip external model/source path checks before launch")
+    parser.add_argument("--geojson-only", action="store_true", help="write missing per-tile GeoJSON from existing masks")
+    parser.add_argument("--overwrite-geojson", action="store_true", help="rewrite existing per-tile GeoJSON files")
     parser.add_argument("--force-lock", action="store_true", help="ignore an existing stale run lock")
     return parser
 

@@ -67,6 +67,72 @@ except Exception:  # pragma: no cover - only used outside notebooks.
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+DEFAULT_COHORT_CONFIG = PACKAGE_ROOT / "configs" / "cohort_inference_slides.yaml"
+
+
+def _expand_config_path(raw: str | None) -> Path | None:
+    if raw is None or not str(raw).strip():
+        return None
+    path = Path(os.path.expandvars(str(raw)).strip()).expanduser()
+    if not path.is_absolute():
+        path = PACKAGE_ROOT / path
+    return path.resolve(strict=False)
+
+
+def _load_config_environment() -> Tuple[dict, Path | None]:
+    raw_config = (
+        os.getenv("TRIAL3_CONFIG")
+        or os.getenv("TRIAL3_CONFIG_PATH")
+        or os.getenv("TRIAL3_COHORT_CONFIG")
+    )
+    config_path = _expand_config_path(raw_config) if raw_config else DEFAULT_COHORT_CONFIG
+    if config_path is None or not config_path.exists():
+        if raw_config:
+            print(f"WARNING: Trial Run 3 config YAML not found: {config_path}", flush=True)
+        return {}, None
+    try:
+        config = yaml.safe_load(config_path.read_text()) or {}
+    except Exception as exc:
+        print(f"WARNING: could not read Trial Run 3 config YAML {config_path}: {exc}", flush=True)
+        return {}, config_path
+    environment = config.get("environment") or {}
+    return environment if isinstance(environment, dict) else {}, config_path
+
+
+CONFIG_ENVIRONMENT, CONFIG_PATH = _load_config_environment()
+
+
+def _expand_model_path(raw: str | Path, base: Path | None = None) -> Path:
+    path = Path(os.path.expandvars(str(raw)).strip()).expanduser()
+    if not path.is_absolute():
+        path = (base or PACKAGE_ROOT) / path
+    return path.resolve(strict=False)
+
+
+def _config_value(name: str) -> str | None:
+    value = CONFIG_ENVIRONMENT.get(name)
+    if value is None or not str(value).strip():
+        return None
+    return str(value)
+
+
+def _resolve_model_path(
+    name: str,
+    default: str | Path,
+    *,
+    default_source: str | None = None,
+) -> Tuple[Path, str]:
+    env_value = os.getenv(name)
+    if env_value is not None and env_value.strip():
+        return _expand_model_path(env_value), f"environment variable {name}"
+    config_value = _config_value(name)
+    if config_value is not None:
+        source = f"configuration YAML environment.{name}"
+        if CONFIG_PATH is not None:
+            source += f" ({CONFIG_PATH})"
+        return _expand_model_path(config_value), source
+    return _expand_model_path(default), default_source or f"default fallback for {name}"
+
 
 COCO_ROOT = Path(
     os.getenv(
@@ -89,42 +155,42 @@ FAST_IMAGE_INDEX = os.getenv("TRIAL3_FAST_IMAGE_INDEX", "1") == "1"
 IMAGE_INDEX_READ_SIZES = os.getenv("TRIAL3_IMAGE_INDEX_READ_SIZES", "0") == "1"
 FAST_IMAGE_DEFAULT_WIDTH = int(os.getenv("TRIAL3_FAST_IMAGE_DEFAULT_WIDTH", "512"))
 FAST_IMAGE_DEFAULT_HEIGHT = int(os.getenv("TRIAL3_FAST_IMAGE_DEFAULT_HEIGHT", "512"))
-SAM3_REPO = Path(
-    os.getenv("SAM3_REPO", "/home/jovyan/Desktop/sam31-cgh-training-data/sam3")
-).expanduser()
-SAM31_OUTPUT_ROOT = Path(
-    os.getenv(
-        "SAM31_OUTPUT_ROOT",
-        str(PACKAGE_ROOT / "outputs" / "strategy2_41tiles_full_unfreeze_20260625_160623"),
-    )
-).expanduser()
-SAM31_CHECKPOINT = Path(
-    os.getenv("SAM31_CHECKPOINT", str(SAM31_OUTPUT_ROOT / "checkpoints" / "checkpoint.pt"))
-).expanduser()
-CELLSEG1_REPO = Path(
-    os.getenv(
-        "CELLSEG1_REPO",
-        "/home/jovyan/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_repo",
-    )
-).expanduser()
-CELLSEG1_RUN_DIR = Path(
-    os.getenv(
-        "CELLSEG1_RUN_DIR",
-        "/home/jovyan/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_cgh_p2_41full_20260625_124306",
-    )
-).expanduser()
-CELLSEG1_CONFIG_PATH = Path(
-    os.getenv("CELLSEG1_CONFIG_PATH", str(CELLSEG1_RUN_DIR / "cellseg1_cgh_p2_runtime_config.yaml"))
-).expanduser()
-CELLSEG1_LORA = Path(
-    os.getenv("CELLSEG1_LORA", str(CELLSEG1_RUN_DIR / "sam_lora_cgh_p2_cell_boundary.pth"))
-).expanduser()
-YOLO_MODEL_PATH = Path(
-    os.getenv(
-        "YOLO_MODEL_PATH",
-        "/home/jovyan/Desktop/sam31-cgh-training-data/training_data/reference_models/cellseg1_cgh_p2_yolo_best.pt",
-    )
-).expanduser()
+PATH_SOURCES: dict[str, str] = {}
+SAM3_REPO, PATH_SOURCES["SAM3_REPO"] = _resolve_model_path(
+    "SAM3_REPO",
+    "/home/jovyan/Desktop/sam31-cgh-training-data/sam3",
+)
+SAM31_OUTPUT_ROOT, PATH_SOURCES["SAM31_OUTPUT_ROOT"] = _resolve_model_path(
+    "SAM31_OUTPUT_ROOT",
+    PACKAGE_ROOT / "outputs" / "strategy2_41tiles_full_unfreeze_20260625_160623",
+)
+SAM31_CHECKPOINT, PATH_SOURCES["SAM31_CHECKPOINT"] = _resolve_model_path(
+    "SAM31_CHECKPOINT",
+    SAM31_OUTPUT_ROOT / "checkpoints" / "checkpoint.pt",
+    default_source=f"derived from SAM31_OUTPUT_ROOT ({PATH_SOURCES['SAM31_OUTPUT_ROOT']})",
+)
+CELLSEG1_REPO, PATH_SOURCES["CELLSEG1_REPO"] = _resolve_model_path(
+    "CELLSEG1_REPO",
+    "/home/jovyan/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_repo",
+)
+CELLSEG1_RUN_DIR, PATH_SOURCES["CELLSEG1_RUN_DIR"] = _resolve_model_path(
+    "CELLSEG1_RUN_DIR",
+    "/home/jovyan/Desktop/1.Data/training_pa_he_annotation_full/outputs/cellseg1_cluster_live/cellseg1_cgh_p2_41full_20260625_124306",
+)
+CELLSEG1_CONFIG_PATH, PATH_SOURCES["CELLSEG1_CONFIG_PATH"] = _resolve_model_path(
+    "CELLSEG1_CONFIG_PATH",
+    CELLSEG1_RUN_DIR / "cellseg1_cgh_p2_runtime_config.yaml",
+    default_source=f"derived from CELLSEG1_RUN_DIR ({PATH_SOURCES['CELLSEG1_RUN_DIR']})",
+)
+CELLSEG1_LORA, PATH_SOURCES["CELLSEG1_LORA"] = _resolve_model_path(
+    "CELLSEG1_LORA",
+    CELLSEG1_RUN_DIR / "sam_lora_cgh_p2_cell_boundary.pth",
+    default_source=f"derived from CELLSEG1_RUN_DIR ({PATH_SOURCES['CELLSEG1_RUN_DIR']})",
+)
+YOLO_MODEL_PATH, PATH_SOURCES["YOLO_MODEL_PATH"] = _resolve_model_path(
+    "YOLO_MODEL_PATH",
+    "/home/jovyan/Desktop/sam31-cgh-training-data/training_data/reference_models/cellseg1_cgh_p2_yolo_best.pt",
+)
 
 TRIAL3_TILE_KEYS_RAW = os.getenv("TRIAL3_TILE_KEYS", "ALL").strip()
 PROCESS_ALL_TILES = TRIAL3_TILE_KEYS_RAW.upper() in {"", "*", "ALL"}
@@ -140,6 +206,7 @@ OUT_DIR = Path(os.getenv("TRIAL3_OUT_DIR", str(SAM31_OUTPUT_ROOT / TRIAL3_NAME))
 PRED_MASK_DIR = OUT_DIR / "pred_masks"
 COMPARE_DIR = OUT_DIR / "comparison_images"
 DIAGNOSTIC_DIR = OUT_DIR / "diagnostic_images"
+GEOJSON_DIR = OUT_DIR / "geojson"
 
 SPLITS = [token.strip() for token in os.getenv("TRIAL3_SPLITS", "train,test").split(",") if token.strip()]
 TRIAL3_TILE_KEYS = [
@@ -180,6 +247,11 @@ CELLSEG1_NUCLEUS_OVERLAP_PX = int(os.getenv("TRIAL3_MIN_NUCLEUS_OVERLAP_PX", "5"
 DISPLAY_IMAGES = os.getenv("TRIAL3_DISPLAY_IMAGES", "0") == "1"
 SAVE_COMPARISONS = os.getenv("TRIAL3_SAVE_COMPARISONS", "1") == "1"
 SAVE_DIAGNOSTICS = os.getenv("TRIAL3_SAVE_DIAGNOSTICS", "1") == "1"
+SAVE_GEOJSON = os.getenv("TRIAL3_SAVE_GEOJSON", "1") == "1"
+GEOJSON_ONLY = os.getenv("TRIAL3_GEOJSON_ONLY", "0") == "1"
+OVERWRITE_GEOJSON = os.getenv("TRIAL3_OVERWRITE_GEOJSON", "0") == "1"
+GEOJSON_COORDS = os.getenv("TRIAL3_GEOJSON_COORDS", "global").strip().lower()
+GEOJSON_APPROX_EPSILON = float(os.getenv("TRIAL3_GEOJSON_APPROX_EPSILON", "0"))
 COMPARISON_EVERY = max(1, int(os.getenv("TRIAL3_COMPARISON_EVERY", "1")))
 DIAGNOSTIC_EVERY = max(1, int(os.getenv("TRIAL3_DIAGNOSTIC_EVERY", "1")))
 VIS_DPI = int(os.getenv("TRIAL3_VIS_DPI", "180"))
@@ -190,11 +262,76 @@ NUCLEUS_COLOR = np.array([255, 0, 0], dtype=np.uint8)
 SAM_CLEAR_COLOR = np.array([0, 120, 255], dtype=np.uint8)
 CELLSEG_COMPACT_COLOR = np.array([255, 180, 0], dtype=np.uint8)
 HYBRID_COLOR = np.array([0, 255, 255], dtype=np.uint8)
+GEOJSON_CLASS_COLORS = {
+    "clear_cell_boundary": [0, 120, 255],
+    "compact_cell_boundary": [255, 180, 0],
+    "unknown": [0, 255, 255],
+}
 
 
 def assert_path(path: Path, label: str) -> None:
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
+
+
+REQUIRED_MODEL_PATHS = [
+    ("SAM3_REPO", "SAM3 repo", SAM3_REPO),
+    ("SAM31_CHECKPOINT", "SAM3 checkpoint", SAM31_CHECKPOINT),
+    ("YOLO_MODEL_PATH", "YOLO model", YOLO_MODEL_PATH),
+    ("CELLSEG1_REPO", "CellSeg1 repo", CELLSEG1_REPO),
+    ("CELLSEG1_LORA", "CellSeg1 LoRA", CELLSEG1_LORA),
+    ("CELLSEG1_CONFIG_PATH", "CellSeg1 config", CELLSEG1_CONFIG_PATH),
+]
+MODEL_PATH_DIAGNOSTICS = [
+    ("SAM3_REPO", "SAM3 repo", SAM3_REPO),
+    ("SAM31_OUTPUT_ROOT", "SAM3 output root", SAM31_OUTPUT_ROOT),
+    ("SAM31_CHECKPOINT", "SAM3 checkpoint", SAM31_CHECKPOINT),
+    ("YOLO_MODEL_PATH", "YOLO model", YOLO_MODEL_PATH),
+    ("CELLSEG1_REPO", "CellSeg1 repo", CELLSEG1_REPO),
+    ("CELLSEG1_LORA", "CellSeg1 LoRA", CELLSEG1_LORA),
+    ("CELLSEG1_CONFIG_PATH", "CellSeg1 config", CELLSEG1_CONFIG_PATH),
+]
+
+
+def print_model_path_diagnostics() -> None:
+    print("==========================", flush=True)
+    print("MODEL PATHS", flush=True)
+    print("==========================", flush=True)
+    print("", flush=True)
+    for variable, label, path in MODEL_PATH_DIAGNOSTICS:
+        print(f"{label}:", flush=True)
+        print(f"{path}", flush=True)
+        print(f"variable: {variable}", flush=True)
+        print(f"source: {PATH_SOURCES.get(variable, 'unknown')}", flush=True)
+        print(f"exists: {path.exists()}", flush=True)
+        print("", flush=True)
+    print("==========================", flush=True)
+
+
+def model_path_errors() -> List[str]:
+    errors = []
+    for variable, _label, path in REQUIRED_MODEL_PATHS:
+        if path.exists():
+            continue
+        errors.append(
+            "\n".join(
+                [
+                    "ERROR",
+                    "",
+                    variable,
+                    "",
+                    "Resolved path:",
+                    str(path),
+                    "",
+                    f"Generated by: {PATH_SOURCES.get(variable, 'unknown')}",
+                    "",
+                    "File or directory does not exist.",
+                    "",
+                    "Please update your configuration or environment variables.",
+                ]
+            )
+        )
+    return errors
 
 
 def log_step(message: str) -> None:
@@ -348,6 +485,10 @@ def expected_output_paths(tile_key: str) -> Dict[str, Path]:
         "sam_clear": PRED_MASK_DIR / f"{tile_key}_sam31_clear_mask.png",
         "compact": PRED_MASK_DIR / f"{tile_key}_cellseg1_residual_compact_mask.png",
     }
+
+
+def geojson_output_path(tile_key: str) -> Path:
+    return GEOJSON_DIR / f"{tile_key}_hybrid_instances.geojson"
 
 
 def all_expected_outputs_exist(tile_key: str) -> bool:
@@ -1017,6 +1158,213 @@ def mask_perimeter(mask_bool: np.ndarray) -> float:
     return float(sum(cv2.arcLength(contour, True) for contour in contours))
 
 
+def json_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    if not isinstance(value, (list, tuple, dict, np.ndarray)):
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+    return value
+
+
+def tile_coordinate_offset(tile_geometry: Dict[str, int | float]) -> Tuple[int, int, str]:
+    requested = GEOJSON_COORDS if GEOJSON_COORDS in {"global", "local"} else "global"
+    tile_x = tile_geometry.get("tile_x", np.nan)
+    tile_y = tile_geometry.get("tile_y", np.nan)
+    if requested == "global" and not pd.isna(tile_x) and not pd.isna(tile_y):
+        return int(tile_x), int(tile_y), "global"
+    return 0, 0, "local"
+
+
+def contour_to_ring(contour: np.ndarray, offset_x: int, offset_y: int) -> List[List[float]] | None:
+    if GEOJSON_APPROX_EPSILON > 0:
+        contour = cv2.approxPolyDP(contour, GEOJSON_APPROX_EPSILON, True)
+    points = contour.reshape(-1, 2)
+    if len(points) < 3:
+        return None
+    ring = [[float(x + offset_x), float(y + offset_y)] for x, y in points]
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    if len(ring) < 4:
+        return None
+    return ring
+
+
+def final_rows_for_tile(final_rows: Sequence[dict], split: str, tile_id: str) -> List[dict]:
+    rows = []
+    for row in final_rows:
+        row_split = row.get("split")
+        row_tile_id = row.get("tile_id")
+        if pd.isna(row_split) or pd.isna(row_tile_id):
+            continue
+        if str(row_split) == str(split) and str(row_tile_id) == str(tile_id):
+            rows.append(row)
+    return rows
+
+
+def write_tile_geojson(
+    hybrid_mask: np.ndarray,
+    final_rows: Sequence[dict],
+    split: str,
+    tile_id: str,
+    file_name: str,
+    image_path: Path,
+    tile_geometry: Dict[str, int | float],
+    output_path: Path,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    source_by_final_label = {}
+    for row in final_rows:
+        label = row.get("final_label")
+        if pd.isna(label):
+            continue
+        source_by_final_label[int(label)] = row
+
+    offset_x, offset_y, coordinate_space = tile_coordinate_offset(tile_geometry)
+    features = []
+    for final_label in sorted(int(v) for v in np.unique(hybrid_mask) if int(v) != 0):
+        mask_bool = hybrid_mask == final_label
+        contours, _ = cv2.findContours(mask_bool.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        source = source_by_final_label.get(final_label, {})
+        raw_class_name = source.get("final_class_name")
+        class_name = "unknown" if raw_class_name is None or pd.isna(raw_class_name) else str(raw_class_name)
+        color = GEOJSON_CLASS_COLORS.get(class_name, GEOJSON_CLASS_COLORS["unknown"])
+        bbox_x, bbox_y, bbox_w, bbox_h = mask_bbox(mask_bool)
+
+        for part_index, contour in enumerate(contours, start=1):
+            ring = contour_to_ring(contour, offset_x, offset_y)
+            if ring is None:
+                continue
+            properties = {
+                "objectType": "annotation",
+                "name": f"{tile_id}_cell_{final_label:04d}",
+                "classification": {"name": class_name, "color": color},
+                "trial": TRIAL3_NAME,
+                "split": split,
+                "tile_id": tile_id,
+                "file_name": file_name,
+                "image_path": str(image_path),
+                "coordinate_space": coordinate_space,
+                "requested_coordinate_space": GEOJSON_COORDS,
+                "tile_offset_x": offset_x,
+                "tile_offset_y": offset_y,
+                "final_label": final_label,
+                "part_index": part_index,
+                "final_class_id": json_safe(source.get("final_class_id")),
+                "final_class_name": class_name,
+                "source_model": json_safe(source.get("source_model", "unknown")),
+                "source_label": json_safe(source.get("source_label")),
+                "area_px": int(mask_bool.sum()),
+                "bbox_x": bbox_x,
+                "bbox_y": bbox_y,
+                "bbox_w": bbox_w,
+                "bbox_h": bbox_h,
+            }
+            for key, value in tile_geometry.items():
+                properties[key] = json_safe(value)
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": [ring]},
+                    "properties": properties,
+                }
+            )
+
+    payload = {
+        "type": "FeatureCollection",
+        "features": features,
+        "properties": {
+            "trial": TRIAL3_NAME,
+            "split": split,
+            "tile_id": tile_id,
+            "file_name": file_name,
+            "image_path": str(image_path),
+            "coordinate_space": coordinate_space,
+            "requested_coordinate_space": GEOJSON_COORDS,
+            "tile_offset_x": offset_x,
+            "tile_offset_y": offset_y,
+            "feature_count": len(features),
+        },
+    }
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+    return len(features)
+
+
+def write_existing_tile_geojson(
+    tile_key: str,
+    split: str,
+    tile_id: str,
+    image_info: dict,
+    image_path: Path,
+    tile_geometry: Dict[str, int | float],
+    final_instance_rows: Sequence[dict],
+    *,
+    force: bool = False,
+) -> bool:
+    out_path = geojson_output_path(tile_key)
+    if out_path.exists() and not force:
+        return False
+    hybrid_path = expected_output_paths(tile_key)["hybrid"]
+    if not hybrid_path.exists():
+        print(f"{tile_key} | GeoJSON backfill skipped; missing hybrid mask: {hybrid_path}", flush=True)
+        return False
+    hybrid_mask = np.asarray(Image.open(hybrid_path))
+    rows = final_rows_for_tile(final_instance_rows, split, tile_id)
+    feature_count = write_tile_geojson(
+        hybrid_mask,
+        rows,
+        split,
+        tile_id,
+        image_info["file_name"],
+        image_path,
+        tile_geometry,
+        out_path,
+    )
+    print(f"{tile_key} | GeoJSON written: {out_path} features={feature_count}", flush=True)
+    return True
+
+
+def backfill_geojson_only(trial_images: Sequence[dict], final_instance_rows: Sequence[dict]) -> Tuple[int, int, int]:
+    written = 0
+    skipped_existing = 0
+    missing_masks = 0
+    for image_info in trial_images:
+        split = image_info["_split"]
+        tile_id = Path(image_info["file_name"]).stem
+        tile_key = f"{split}_{tile_id}"
+        image_path = Path(image_info["_image_path"])
+        tile_geometry = {key: image_info.get(key, np.nan) for key in ("tile_x", "tile_y", "tile_w", "tile_h")}
+        out_path = geojson_output_path(tile_key)
+        if out_path.exists() and not OVERWRITE_GEOJSON:
+            skipped_existing += 1
+            continue
+        if not expected_output_paths(tile_key)["hybrid"].exists():
+            missing_masks += 1
+            print(f"{tile_key} | GeoJSON-only skipped; hybrid mask is missing", flush=True)
+            continue
+        if write_existing_tile_geojson(
+            tile_key,
+            split,
+            tile_id,
+            image_info,
+            image_path,
+            tile_geometry,
+            final_instance_rows,
+            force=OVERWRITE_GEOJSON,
+        ):
+            written += 1
+    return written, skipped_existing, missing_masks
+
+
 def assign_nuclei_to_cell(cell_bool: np.ndarray, nucleus_mask: np.ndarray) -> Tuple[List[int], int, int, int]:
     assigned_labels = []
     overlap_area = 0
@@ -1257,14 +1605,16 @@ def load_existing_csv_rows(path: Path) -> List[dict]:
 
 def main() -> None:
     log_step("main started")
-    required_paths = [
-        (SAM3_REPO, "SAM3 repo"),
-        (SAM31_CHECKPOINT, "SAM3 checkpoint"),
-        (CELLSEG1_REPO, "CellSeg1 repo"),
-        (CELLSEG1_CONFIG_PATH, "CellSeg1 config"),
-        (CELLSEG1_LORA, "CellSeg1 LoRA checkpoint"),
-        (YOLO_MODEL_PATH, "YOLO model"),
-    ]
+    if GEOJSON_ONLY:
+        log_step("GeoJSON-only mode enabled; model loading and model path validation are skipped")
+    else:
+        print_model_path_diagnostics()
+        errors = model_path_errors()
+        if errors:
+            print("\n\n".join(errors), file=sys.stderr, flush=True)
+            raise SystemExit(2)
+
+    required_paths = []
     if USE_IMAGE_DIR:
         required_paths.append((TRIAL3_IMAGE_DIR, "tile image directory"))
         if TRIAL3_MASK_DIR is not None:
@@ -1280,6 +1630,8 @@ def main() -> None:
     PRED_MASK_DIR.mkdir(parents=True, exist_ok=True)
     COMPARE_DIR.mkdir(parents=True, exist_ok=True)
     DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
+    if SAVE_GEOJSON or GEOJSON_ONLY:
+        GEOJSON_DIR.mkdir(parents=True, exist_ok=True)
     torch.use_deterministic_algorithms(False)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
@@ -1306,6 +1658,9 @@ def main() -> None:
     if len(assigned_keys) > preview_count:
         print(f"Assigned image keys truncated: showing {preview_count}/{len(assigned_keys)}", flush=True)
     print("TRIAL3_SKIP_EXISTING:", int(TRIAL3_SKIP_EXISTING), flush=True)
+    print("TRIAL3_SAVE_GEOJSON:", int(SAVE_GEOJSON), flush=True)
+    print("TRIAL3_GEOJSON_ONLY:", int(GEOJSON_ONLY), flush=True)
+    print("TRIAL3_GEOJSON_COORDS:", GEOJSON_COORDS, flush=True)
     print("SAM3 prompts:", SAM31_CLEAR_PROMPTS, flush=True)
     print("SAM3 score threshold:", SAM31_SCORE_THRESH, flush=True)
 
@@ -1316,6 +1671,22 @@ def main() -> None:
     morphology_csv = OUT_DIR / "trial_run_3_morphology_features.csv"
     morphology_summary_csv = OUT_DIR / "trial_run_3_morphology_summary.csv"
 
+    metrics_rows: List[dict] = load_existing_csv_rows(metrics_csv)
+    source_instance_rows: List[dict] = load_existing_csv_rows(source_csv)
+    final_instance_rows: List[dict] = load_existing_csv_rows(final_csv)
+    morphology_rows: List[dict] = load_existing_csv_rows(morphology_csv)
+    completed_metric_tile_keys = metric_tile_keys_with_complete_rows(metrics_rows)
+
+    if GEOJSON_ONLY:
+        written, skipped_existing, missing_masks = backfill_geojson_only(trial_images, final_instance_rows)
+        print("\nGeoJSON-only complete.")
+        print("Output:", OUT_DIR)
+        print("GeoJSON directory:", GEOJSON_DIR)
+        print("GeoJSON written:", written)
+        print("GeoJSON already existed:", skipped_existing)
+        print("Missing hybrid masks:", missing_masks)
+        return
+
     log_step(f"loading YOLO model: {YOLO_MODEL_PATH}")
     yolo_model = YOLO(str(YOLO_MODEL_PATH))
     print("YOLO names:", yolo_model.names, flush=True)
@@ -1325,11 +1696,6 @@ def main() -> None:
     cellseg_config, read_image_to_numpy, resize_image, cellseg_mask_generator, sam_output_to_mask = load_cellseg1()
     print("CellSeg1 LoRA:", cellseg_config["result_pth_path"], flush=True)
 
-    metrics_rows: List[dict] = load_existing_csv_rows(metrics_csv)
-    source_instance_rows: List[dict] = load_existing_csv_rows(source_csv)
-    final_instance_rows: List[dict] = load_existing_csv_rows(final_csv)
-    morphology_rows: List[dict] = load_existing_csv_rows(morphology_csv)
-    completed_metric_tile_keys = metric_tile_keys_with_complete_rows(metrics_rows)
     pending_metrics_rows: List[dict] = []
     pending_source_instance_rows: List[dict] = []
     pending_final_instance_rows: List[dict] = []
@@ -1340,14 +1706,25 @@ def main() -> None:
         split = image_info["_split"]
         tile_id = Path(image_info["file_name"]).stem
         tile_key = f"{split}_{tile_id}"
+        image_path = Path(image_info["_image_path"])
+        tile_geometry = {key: image_info.get(key, np.nan) for key in ("tile_x", "tile_y", "tile_w", "tile_h")}
         if should_skip_tile(tile_key, completed_metric_tile_keys):
             print("\n" + "=" * 100)
             print(f"Skipping existing tile: {tile_key}")
             print("Existing hybrid mask:", expected_output_paths(tile_key)["hybrid"])
+            if SAVE_GEOJSON:
+                write_existing_tile_geojson(
+                    tile_key,
+                    split,
+                    tile_id,
+                    image_info,
+                    image_path,
+                    tile_geometry,
+                    final_instance_rows,
+                    force=OVERWRITE_GEOJSON,
+                )
             continue
 
-        image_path = Path(image_info["_image_path"])
-        tile_geometry = {key: image_info.get(key, np.nan) for key in ("tile_x", "tile_y", "tile_w", "tile_h")}
         print("\n" + "=" * 100)
         print("Trial 3 running:", tile_key)
         if TRIAL3_SKIP_EXISTING and all_expected_outputs_exist(tile_key):
@@ -1413,6 +1790,19 @@ def main() -> None:
         Image.fromarray(nucleus_mask.astype(np.uint16)).save(paths["nucleus"])
         Image.fromarray(sam_clear.astype(np.uint16)).save(paths["sam_clear"])
         Image.fromarray(compact_candidate.astype(np.uint16)).save(paths["compact"])
+        if SAVE_GEOJSON:
+            geojson_path = geojson_output_path(tile_key)
+            feature_count = write_tile_geojson(
+                hybrid_mask,
+                final_rows,
+                split,
+                tile_id,
+                image_info["file_name"],
+                image_path,
+                tile_geometry,
+                geojson_path,
+            )
+            print(f"{tile_key} | GeoJSON written: {geojson_path} features={feature_count}", flush=True)
 
         for model_name, pred_mask, gt_mask in [
             ("SAM3_clear_vs_GT_clear", sam_clear, gt_clear),
@@ -1624,6 +2014,7 @@ def main() -> None:
     print("Final instances:", final_csv)
     print("Morphology features:", morphology_csv)
     print("Morphology summary:", morphology_summary_csv)
+    print("GeoJSON directory:", GEOJSON_DIR)
     print("Comparison images:", COMPARE_DIR)
     print("Diagnostic images:", DIAGNOSTIC_DIR)
     print(summary_df)

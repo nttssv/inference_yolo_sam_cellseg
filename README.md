@@ -312,6 +312,33 @@ Merged slide CSVs are written to:
 ~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/merged/
 ```
 
+Per-tile final-cell boundary GeoJSON files are written to each worker output:
+
+```text
+~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/worker_<id>/geojson/
+```
+
+After a slide completes, all worker GeoJSON files are also copied to:
+
+```text
+~/Desktop/Create_Cell_Atlas_Inference_Output/<slide_name>/merged/geojson/
+```
+
+GeoJSON coordinates default to slide/global pixel coordinates when tile
+filenames contain `x..._y...`; otherwise they fall back to local tile
+coordinates. To create GeoJSON for tiles that were already processed before
+GeoJSON output existed, run:
+
+```bash
+python scripts/run_cohort_trial3_inference.py \
+  --config configs/cohort_inference_slides.yaml \
+  --run \
+  --geojson-only
+```
+
+Use `--overwrite-geojson` with `--geojson-only` to rewrite existing GeoJSON
+files.
+
 Open the cohort dashboard notebook:
 
 ```bash
