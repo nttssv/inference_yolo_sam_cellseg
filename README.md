@@ -203,6 +203,44 @@ merged_trial_run_3_final_instances.csv
 merged_trial_run_3_morphology_features.csv
 ```
 
+## Supervised Long Runs
+
+For multi-hour cluster runs, use the supervisor instead of relying on the
+notebook launcher. It restarts a worker when the process exits with a native
+CUDA/PyTorch crash such as return code `-11`, or when no completed tile appears
+for a long stall window. Restarts are safe because the worker runs with
+`TRIAL3_SKIP_EXISTING=1` and skips only tiles with complete mask outputs and
+complete metrics rows.
+
+One A100 80GB running two workers on GPU 0:
+
+```bash
+cd ~/Desktop/inference_yolo_sam_cellseg
+python supervise_trial_run_3.py \
+  --workers 2 \
+  --gpu-ids 0 \
+  --tile-dir "$HOME/Desktop/prototype5_whole_image_runs/target_region_6262_13752um/tiles" \
+  --base-out "$HOME/Desktop/prototype5_whole_image_runs/trial_run_3_yolo_sam_cellseg" \
+  --stale-seconds 900 \
+  --traceback-seconds 600 \
+  --csv-append-every 1
+```
+
+`Timeout (0:03:00)!` in older logs comes from Python `faulthandler` dumping a
+stack trace after 180 seconds. It is diagnostic output, not a restart policy.
+The supervisor defaults to `--traceback-seconds 600` and only restarts a running
+worker after `--stale-seconds` without new completed tiles.
+
+Useful live checks:
+
+```bash
+watch -n 2 nvidia-smi
+tail -f "$HOME/Desktop/prototype5_whole_image_runs/trial_run_3_yolo_sam_cellseg/worker_00.log"
+tail -f "$HOME/Desktop/prototype5_whole_image_runs/trial_run_3_yolo_sam_cellseg/worker_01.log"
+```
+
+Stop the supervisor with `Ctrl-C`; it will terminate its worker processes.
+
 ## Useful Parameters
 
 ```bash
