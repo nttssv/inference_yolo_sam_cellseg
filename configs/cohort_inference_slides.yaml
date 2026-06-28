@@ -6,6 +6,7 @@ cohort:
   gpu_ids: [0]
   poll_seconds: 30
   stale_seconds: 900
+  startup_stale_seconds: 3600
   restart_delay_seconds: 20
   kill_timeout_seconds: 30
   max_restarts: -1

@@ -68,6 +68,7 @@ class WorkerRuntime:
     restarts: int = 0
     last_completed: int = 0
     last_progress_ts: float = 0.0
+    last_log_mtime: float = 0.0
     launch_ts: float = 0.0
     started_at_iso: str = ""
     status: str = "pending"
@@ -145,6 +146,7 @@ def settings_from_config(config: dict[str, Any]) -> dict[str, Any]:
         "gpu_ids": parse_gpu_ids(cohort.get("gpu_ids", [0])),
         "poll_seconds": int(cohort.get("poll_seconds", 30)),
         "stale_seconds": int(cohort.get("stale_seconds", 900)),
+        "startup_stale_seconds": int(cohort.get("startup_stale_seconds", 3600)),
         "restart_delay_seconds": int(cohort.get("restart_delay_seconds", 20)),
         "kill_timeout_seconds": int(cohort.get("kill_timeout_seconds", 30)),
         "max_restarts": int(cohort.get("max_restarts", -1)),
@@ -489,6 +491,7 @@ def launch_worker(
     state.log_handle = log_path.open("a", buffering=1)
     state.launch_ts = time.time()
     state.last_progress_ts = state.launch_ts
+    state.last_log_mtime = log_path.stat().st_mtime if log_path.exists() else state.launch_ts
     state.started_at_iso = state.started_at_iso or now_iso()
     state.last_completed = count_completed(out_dir)
     state.status = "running"
@@ -1061,7 +1064,15 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
         now = time.time()
         for worker_id, state in states.items():
             out_dir = worker_out_dir(slide_dir, worker_id)
+            log_path = worker_log_path(slide_dir, worker_id)
             completed = count_completed(out_dir)
+            try:
+                log_mtime = log_path.stat().st_mtime
+            except FileNotFoundError:
+                log_mtime = 0.0
+            if log_mtime > state.last_log_mtime:
+                state.last_log_mtime = log_mtime
+                state.last_progress_ts = now
             if completed > state.last_completed:
                 print(
                     f"[cohort] {slide_name} worker {worker_id:02d} progress "
@@ -1130,7 +1141,7 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
                     f"worker stopped before completion rc={return_code} at "
                     f"{completed}/{state.tiles_total}; restarting with TRIAL3_SKIP_EXISTING=1"
                 )
-                current_tile = parse_current_tile_from_log(worker_log_path(slide_dir, worker_id))
+                current_tile = parse_current_tile_from_log(log_path)
                 if not state.failed_tile_recorded:
                     append_failed_timing(slide_dir, slide_name, worker_id, current_tile, state.error)
                     state.failed_tile_recorded = True
@@ -1155,9 +1166,27 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
                 launch_worker(config, settings, slide, state, tile_dir, slide_dir, restart=True)
                 continue
 
+            phase, latest_log_line = log_phase_and_latest(log_path)
+            startup_phases = {
+                "waiting_for_log",
+                "started",
+                "checking_paths",
+                "indexing_inputs",
+                "loading_yolo",
+                "loading_sam3",
+                "loading_cellseg1",
+            }
+            effective_stale_seconds = (
+                settings["startup_stale_seconds"]
+                if completed == 0 and phase in startup_phases
+                else settings["stale_seconds"]
+            )
             stale_for = now - state.last_progress_ts
-            if stale_for >= settings["stale_seconds"]:
-                state.error = f"stale for {int(stale_for)}s at {completed}/{state.tiles_total}"
+            if stale_for >= effective_stale_seconds:
+                state.error = (
+                    f"stale for {int(stale_for)}s at {completed}/{state.tiles_total} "
+                    f"phase={phase} limit={effective_stale_seconds}s latest_log={latest_log_line[:160]}"
+                )
                 print(f"[cohort] {slide_name} worker {worker_id:02d} {state.error}; restarting", flush=True)
                 stop_worker(state, settings["kill_timeout_seconds"])
                 if not restart_allowed(settings, state):
