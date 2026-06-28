@@ -25,6 +25,11 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
+os.environ.setdefault("WANDB_DISABLED", "true")
+os.environ.setdefault("WANDB_MODE", "disabled")
+os.environ.setdefault("WANDB_SILENT", "true")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -1108,24 +1113,34 @@ def extract_morphology_rows(
 def load_sam3_processor():
     if str(SAM3_REPO) not in sys.path:
         sys.path.insert(0, str(SAM3_REPO))
+    log_step("SAM3 import start")
     from sam3.model.sam3_image_processor import Sam3Processor
     from sam3.model_builder import build_sam3_image_model
+    log_step("SAM3 import done")
 
+    log_step("SAM3 build model start")
     model = build_sam3_image_model(
         checkpoint_path=None,
         load_from_HF=False,
         eval_mode=True,
         enable_segmentation=True,
     )
+    log_step("SAM3 build model done")
+    log_step(f"SAM3 checkpoint load start: {SAM31_CHECKPOINT}")
     checkpoint = torch.load(SAM31_CHECKPOINT, map_location="cpu")
+    log_step("SAM3 checkpoint load done")
+    log_step("SAM3 state dict load start")
     missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
     print("SAM3 missing:", len(missing))
     print("SAM3 unexpected:", len(unexpected))
     if missing or unexpected:
         raise RuntimeError(f"SAM3 checkpoint mismatch. missing={missing[:10]} unexpected={unexpected[:10]}")
     if torch.cuda.is_available():
+        log_step("SAM3 cuda move start")
         model = model.cuda()
+        log_step("SAM3 cuda move done")
     model.eval()
+    log_step("SAM3 processor ready")
     return Sam3Processor(model)
 
 

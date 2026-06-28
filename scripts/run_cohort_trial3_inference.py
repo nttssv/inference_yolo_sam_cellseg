@@ -411,6 +411,10 @@ def build_worker_env(
             "CUDA_VISIBLE_DEVICES": str(settings["gpu_ids"][worker_id % len(settings["gpu_ids"])]),
             "PYTHONUNBUFFERED": "1",
             "PYTHONFAULTHANDLER": "1",
+            "WANDB_DISABLED": "true",
+            "WANDB_MODE": "disabled",
+            "WANDB_SILENT": "true",
+            "HF_HUB_DISABLE_TELEMETRY": "1",
             "TRIAL3_TRACEBACK_AFTER_SECONDS": str(trial3.get("traceback_after_seconds", 600)),
             "TRIAL3_IMAGE_DIR": str(tile_dir),
             "TRIAL3_TILE_KEYS": str(trial3.get("tile_keys", "ALL")),
@@ -753,6 +757,16 @@ def log_phase_and_latest(path: Path) -> tuple[str, str]:
             phase = "loading_cellseg1"
         elif "loading sam3 processor" in lowered:
             phase = "loading_sam3"
+        elif "sam3 import" in lowered:
+            phase = "sam3_import"
+        elif "sam3 build model" in lowered:
+            phase = "sam3_build"
+        elif "sam3 checkpoint" in lowered or "sam3 state dict" in lowered:
+            phase = "sam3_checkpoint"
+        elif "sam3 cuda move" in lowered:
+            phase = "sam3_cuda"
+        elif "sam3 processor ready" in lowered:
+            phase = "sam3_ready"
         elif "loading yolo model" in lowered:
             phase = "loading_yolo"
         elif "loading input index" in lowered:
@@ -1174,6 +1188,11 @@ def run_slide(config: dict[str, Any], settings: dict[str, Any], slide: dict[str,
                 "indexing_inputs",
                 "loading_yolo",
                 "loading_sam3",
+                "sam3_import",
+                "sam3_build",
+                "sam3_checkpoint",
+                "sam3_cuda",
+                "sam3_ready",
                 "loading_cellseg1",
             }
             effective_stale_seconds = (
