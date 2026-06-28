@@ -81,6 +81,9 @@ TRIAL3_IMAGE_SUFFIXES = tuple(
     if token.strip()
 )
 FAST_IMAGE_INDEX = os.getenv("TRIAL3_FAST_IMAGE_INDEX", "1") == "1"
+IMAGE_INDEX_READ_SIZES = os.getenv("TRIAL3_IMAGE_INDEX_READ_SIZES", "0") == "1"
+FAST_IMAGE_DEFAULT_WIDTH = int(os.getenv("TRIAL3_FAST_IMAGE_DEFAULT_WIDTH", "512"))
+FAST_IMAGE_DEFAULT_HEIGHT = int(os.getenv("TRIAL3_FAST_IMAGE_DEFAULT_HEIGHT", "512"))
 SAM3_REPO = Path(
     os.getenv("SAM3_REPO", "/home/jovyan/Desktop/sam31-cgh-training-data/sam3")
 ).expanduser()
@@ -234,15 +237,28 @@ def find_mask_for_image(image_path: Path) -> Path | None:
 
 
 def parse_tile_geometry(file_name: str) -> Dict[str, int | float]:
-    match = re.search(r"(?:^|[_-])x(?P<x>\d+)[_-]y(?P<y>\d+)[_-]w(?P<w>\d+)[_-]h(?P<h>\d+)", file_name)
-    if not match:
-        return {"tile_x": np.nan, "tile_y": np.nan, "tile_w": np.nan, "tile_h": np.nan}
-    return {
-        "tile_x": int(match.group("x")),
-        "tile_y": int(match.group("y")),
-        "tile_w": int(match.group("w")),
-        "tile_h": int(match.group("h")),
-    }
+    full_match = re.search(
+        r"(?:^|[_-])x(?P<x>\d+)[_-]y(?P<y>\d+)[_-]w(?P<w>\d+)[_-]h(?P<h>\d+)",
+        file_name,
+    )
+    if full_match:
+        return {
+            "tile_x": int(full_match.group("x")),
+            "tile_y": int(full_match.group("y")),
+            "tile_w": int(full_match.group("w")),
+            "tile_h": int(full_match.group("h")),
+        }
+
+    xy_match = re.search(r"(?:^|[_-])x(?P<x>\d+)[_-]y(?P<y>\d+)", file_name)
+    if xy_match:
+        return {
+            "tile_x": int(xy_match.group("x")),
+            "tile_y": int(xy_match.group("y")),
+            "tile_w": np.nan,
+            "tile_h": np.nan,
+        }
+
+    return {"tile_x": np.nan, "tile_y": np.nan, "tile_w": np.nan, "tile_h": np.nan}
 
 
 def load_image_dir() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], List[dict]], List[dict]]:
@@ -258,6 +274,9 @@ def load_image_dir() -> Tuple[Dict[Tuple[str, int], str], Dict[Tuple[str, int], 
         if FAST_IMAGE_INDEX and not pd.isna(tile_geometry["tile_w"]) and not pd.isna(tile_geometry["tile_h"]):
             width = int(tile_geometry["tile_w"])
             height = int(tile_geometry["tile_h"])
+        elif FAST_IMAGE_INDEX and not IMAGE_INDEX_READ_SIZES:
+            width = FAST_IMAGE_DEFAULT_WIDTH
+            height = FAST_IMAGE_DEFAULT_HEIGHT
         else:
             with Image.open(image_path) as image:
                 width, height = image.size

@@ -423,6 +423,9 @@ def build_worker_env(
             "TRIAL3_CSV_APPEND_EVERY": str(trial3.get("csv_append_every", 1)),
             "TRIAL3_VIS_DPI": str(trial3.get("vis_dpi", 120)),
             "TRIAL3_FAST_IMAGE_INDEX": str(trial3.get("fast_image_index", 1)),
+            "TRIAL3_IMAGE_INDEX_READ_SIZES": str(trial3.get("image_index_read_sizes", 0)),
+            "TRIAL3_FAST_IMAGE_DEFAULT_WIDTH": str(trial3.get("fast_image_default_width", 512)),
+            "TRIAL3_FAST_IMAGE_DEFAULT_HEIGHT": str(trial3.get("fast_image_default_height", 512)),
             "TRIAL3_IMAGE_SUFFIXES": ",".join(sorted(settings["image_suffixes"])),
         }
     )

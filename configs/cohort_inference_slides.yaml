@@ -24,6 +24,9 @@ trial3:
   vis_dpi: 120
   traceback_after_seconds: 180
   fast_image_index: 1
+  image_index_read_sizes: 0
+  fast_image_default_width: 512
+  fast_image_default_height: 512
 
 monitor:
   refresh_seconds: 5
